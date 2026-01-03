@@ -18,6 +18,8 @@ CREATE TABLE IF NOT EXISTS parts (
   status TEXT NOT NULL DEFAULT 'ready-to-manufacture',
   drawn_by TEXT,
   reviewed_by TEXT,
+  is_cots BOOLEAN DEFAULT FALSE,
+  details JSONB DEFAULT '{}'::jsonb,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -26,6 +28,7 @@ CREATE TABLE IF NOT EXISTS parts (
 CREATE INDEX IF NOT EXISTS idx_parts_subsystem_id ON parts(subsystem_id);
 CREATE INDEX IF NOT EXISTS idx_parts_status ON parts(status);
 CREATE INDEX IF NOT EXISTS idx_parts_created_at ON parts(created_at);
+CREATE INDEX IF NOT EXISTS idx_parts_is_cots ON parts(is_cots);
 
 -- Enable Row Level Security (RLS)
 ALTER TABLE subsystems ENABLE ROW LEVEL SECURITY;

@@ -77,7 +77,7 @@
 /* Main Content */
 .App-main {
   flex: 1;
-  padding: 4rem 0;
+  padding: 0 0 4rem 0;
   background-color: #fafafa;
 }
 

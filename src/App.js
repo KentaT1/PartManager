@@ -22,12 +22,6 @@ function App() {
       </header>
       <main className="App-main">
         <div className="container">
-          <section className="hero-section">
-            <h2 className="section-title">Parts Management System</h2>
-            <p className="section-description">
-              Manage and track parts across all subsystems for your robotics projects.
-            </p>
-          </section>
           <PartsManager />
         </div>
       </main>
