@@ -25,9 +25,8 @@ function Lifecycle() {
   const [selectedPartsForFailure, setSelectedPartsForFailure] = useState([]);
   const [partsSearchTerm, setPartsSearchTerm] = useState('');
   const [showPartsDropdown, setShowPartsDropdown] = useState(false);
-  const [selectedSystemForWpilog, setSelectedSystemForWpilog] = useState('');
   const [wpilogFile, setWpilogFile] = useState(null);
-  const [wpilogTime, setWpilogTime] = useState('');
+  const [uploadingWpilog, setUploadingWpilog] = useState(false);
 
   // System Management state
   const [editingSystem, setEditingSystem] = useState(null);
@@ -259,7 +258,8 @@ function Lifecycle() {
         .insert([{
           name: newSystem.name.trim(),
           description: newSystem.description.trim() || null,
-          usage_time: parseFloat(newSystem.usage_time) || 0
+          usage_time: parseFloat(newSystem.usage_time) || 0,
+          in_usage: true
         }]);
 
       if (error) {
@@ -297,6 +297,60 @@ function Lifecycle() {
     } catch (error) {
       console.error('Error updating usage time:', error);
       showAlert('Error updating usage time: ' + error.message);
+    }
+  };
+
+  const handleDragStart = (e, systemId) => {
+    e.dataTransfer.setData('systemId', systemId.toString());
+    e.dataTransfer.effectAllowed = 'move';
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    e.currentTarget.classList.add('drag-over');
+  };
+
+  const handleDragLeave = (e) => {
+    e.currentTarget.classList.remove('drag-over');
+  };
+
+  const handleDrop = async (e, targetCategory) => {
+    e.preventDefault();
+    e.currentTarget.classList.remove('drag-over');
+    
+    const systemId = parseInt(e.dataTransfer.getData('systemId'));
+    
+    if (!systemId) return;
+
+    const system = systems.find(s => s.id === systemId);
+    if (!system) return;
+
+    const newInUsage = targetCategory === 'in-usage';
+    
+    // Only update if the category actually changed
+    if (system.in_usage === newInUsage) return;
+
+    await updateSystemUsageStatus(systemId, newInUsage);
+  };
+
+  const handleToggleUsageStatus = async (systemId, currentStatus) => {
+    const newInUsage = !currentStatus;
+    await updateSystemUsageStatus(systemId, newInUsage);
+  };
+
+  const updateSystemUsageStatus = async (systemId, newInUsage) => {
+    try {
+      const { error } = await supabase
+        .from('systems')
+        .update({ in_usage: newInUsage })
+        .eq('id', systemId);
+
+      if (error) throw error;
+      fetchSystems();
+    } catch (error) {
+      console.error('Error updating system category:', error);
+      showAlert('Error updating system category: ' + error.message);
     }
   };
 
@@ -375,47 +429,74 @@ function Lifecycle() {
   };
 
   const handleWpilogUpload = async () => {
-    if (!selectedSystemForWpilog || !wpilogTime) {
-      showAlert('Please select a system and enter time');
+    if (!wpilogFile) {
+      showAlert('Please select a wpilog file');
       return;
     }
 
+    if (!isSupabaseConfigured) {
+      showAlert('Supabase is not configured');
+      return;
+    }
+
+    setUploadingWpilog(true);
+
     try {
-      const timeValue = parseFloat(wpilogTime);
-      if (isNaN(timeValue) || timeValue <= 0) {
-        showAlert('Please enter a valid time value');
+      // Read the file as ArrayBuffer
+      const arrayBuffer = await wpilogFile.arrayBuffer();
+      
+      // Parse the log file to get elapsed time in minutes, then convert to hours
+      const { parseWpilogFileRobust } = await import('../utils/logParser');
+      const elapsedMinutes = await parseWpilogFileRobust(arrayBuffer);
+      const timeValue = elapsedMinutes / 60; // Convert minutes to hours
+
+      // Fetch all systems
+      const { data: allSystems, error: fetchError } = await supabase
+        .from('systems')
+        .select('id, usage_time');
+
+      if (fetchError) throw fetchError;
+
+      if (!allSystems || allSystems.length === 0) {
+        showAlert('No systems found. Create systems first.');
         return;
       }
 
-      // Insert wpilog record
-      const { error: wpilogError } = await supabase
-        .from('wpilog')
-        .insert([{
-          system_id: selectedSystemForWpilog,
-          file_name: wpilogFile ? wpilogFile.name : 'Manual Entry',
-          time_added: timeValue
-        }]);
-
-      if (wpilogError) throw wpilogError;
-
-      // Update system usage time
-      const system = systems.find(s => s.id === parseInt(selectedSystemForWpilog));
-      if (system) {
-        const newUsageTime = (system.usage_time || 0) + timeValue;
-        await supabase
+      // Insert wpilog record for all systems (or we could store it once)
+      // For now, we'll just update usage times
+      
+      // Update all systems' usage_time by adding elapsed time to each
+      const updatePromises = allSystems.map(system => {
+        const currentUsageTime = system.usage_time || 0;
+        const newUsageTime = currentUsageTime + timeValue;
+        
+        return supabase
           .from('systems')
           .update({ usage_time: newUsageTime })
           .eq('id', system.id);
+      });
+
+      const results = await Promise.all(updatePromises);
+      
+      // Check for any errors
+      const errors = results.filter(result => result.error);
+      if (errors.length > 0) {
+        throw new Error(`Failed to update ${errors.length} system(s)`);
       }
 
-      setSelectedSystemForWpilog('');
       setWpilogFile(null);
-      setWpilogTime('');
+      
+      // Reset file input
+      const fileInput = document.querySelector('input[type="file"]');
+      if (fileInput) fileInput.value = '';
+      
       fetchSystems();
-      showAlert('Wpilog uploaded and system usage time updated successfully');
+      showAlert(`Success! Added ${timeValue.toFixed(2)} hours to all ${allSystems.length} system(s).`);
     } catch (error) {
       console.error('Error uploading wpilog:', error);
       showAlert('Error uploading wpilog: ' + error.message);
+    } finally {
+      setUploadingWpilog(false);
     }
   };
 
@@ -447,12 +528,21 @@ function Lifecycle() {
 
       if (error) throw error;
 
+      // Reset time_since_last_maintenance to 0 for the system
+      const { error: updateError } = await supabase
+        .from('systems')
+        .update({ time_since_last_maintenance: 0.0 })
+        .eq('id', selectedSystemForFailure);
+
+      if (updateError) throw updateError;
+
       setSelectedSystemForFailure('');
       setFailureComponents('');
       setFailureComment('');
       setSelectedPartsForFailure([]);
       setPartsSearchTerm('');
       setShowPartsDropdown(false);
+      fetchSystems(); // Refresh systems to show updated time_since_last_maintenance
       showAlert('Failure reported successfully');
     } catch (error) {
       console.error('Error reporting failure:', error);
@@ -899,44 +989,27 @@ function Lifecycle() {
             <div className="dashboard-box">
               <h3>Upload Wpilog</h3>
               <div className="form-group">
-                <label>Select System</label>
-                <select
-                  value={selectedSystemForWpilog}
-                  onChange={(e) => setSelectedSystemForWpilog(e.target.value)}
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
-                >
-                  <option value="">-- Select System --</option>
-                  {systems.map(system => (
-                    <option key={system.id} value={system.id}>{system.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Time (hours)</label>
-                <input
-                  type="number"
-                  value={wpilogTime}
-                  onChange={(e) => setWpilogTime(e.target.value)}
-                  step="0.1"
-                  min="0"
-                  placeholder="Enter time in hours"
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
-                />
-              </div>
-              <div className="form-group">
-                <label>Wpilog File (optional)</label>
+                <label>Wpilog File</label>
                 <input
                   type="file"
+                  accept=".wpilog"
                   onChange={(e) => setWpilogFile(e.target.files[0])}
+                  disabled={uploadingWpilog}
                   style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
                 />
+                {wpilogFile && (
+                  <p style={{ margin: '0.5rem 0', color: '#2563eb', fontSize: '0.9rem' }}>
+                    Selected: {wpilogFile.name}
+                  </p>
+                )}
               </div>
               <button
                 className="btn btn-primary"
                 onClick={handleWpilogUpload}
+                disabled={uploadingWpilog || !wpilogFile}
                 style={{ width: '100%' }}
               >
-                Upload
+                {uploadingWpilog ? 'Processing...' : 'Upload & Process Log'}
               </button>
             </div>
 
@@ -1083,72 +1156,244 @@ function Lifecycle() {
               <p>No systems found. Add a system to start tracking lifecycle data.</p>
             </div>
           ) : (
-            <div className="systems-grid">
-              {systems.map((system) => (
-                <div key={system.id} className="system-card">
-                  <div className="system-card-header">
-                    <h3>{system.name}</h3>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => handleDeleteSystem(system.id)}
-                      style={{ marginLeft: 'auto' }}
+            <div className="systems-categories-container">
+              {/* In Usage Category */}
+              <div className="system-category">
+                <h4 className="category-header">In Usage</h4>
+                <div 
+                  className="systems-grid category-drop-zone"
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, 'in-usage')}
+                >
+                  {systems.filter(s => s.in_usage !== false).map((system) => (
+                    <div 
+                      key={system.id} 
+                      className="system-card draggable-system"
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, system.id)}
                     >
-                      Delete
-                    </button>
-                  </div>
-                  {system.description && (
-                    <p className="system-description">{system.description}</p>
-                  )}
-                  <div className="system-usage">
-                    <label>Usage Time (hours):</label>
-                    <input
-                      type="number"
-                      value={system.usage_time || 0}
-                      onChange={(e) => handleUpdateUsageTime(system.id, e.target.value)}
-                      step="0.1"
-                      min="0"
-                      style={{
-                        width: '100%',
-                        padding: '0.5rem',
-                        marginTop: '0.5rem',
-                        border: '1px solid #d1d5db',
-                        borderRadius: '4px'
-                      }}
-                    />
-                  </div>
-                  
-                  {/* Linked Parts and Subsystems */}
-                  <div className="system-links" style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f3f4f6' }}>
-                    <div style={{ marginBottom: '0.5rem' }}>
-                      <strong>Linked Parts:</strong> {systemParts[system.id]?.length || 0}
-                    </div>
-                    <div style={{ marginBottom: '0.5rem' }}>
-                      <strong>Linked Subsystems:</strong> {systemSubsystems[system.id]?.length || 0}
-                    </div>
-                    <button
-                      className="btn btn-secondary btn-sm"
-                      onClick={() => openLinkPartsModal(system)}
-                      style={{ width: '100%', marginTop: '0.5rem' }}
-                    >
-                      Link Parts/Subsystems
-                    </button>
-                    <button
-                      className="btn btn-primary btn-sm"
-                      onClick={() => openSystemDetails(system)}
-                      style={{ width: '100%', marginTop: '0.5rem' }}
-                    >
-                      View Details
-                    </button>
-                  </div>
+                      <div className="system-card-header">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1 }}>
+                          <h3 style={{ margin: 0 }}>{system.name}</h3>
+                          <label className="usage-toggle-switch">
+                            <input
+                              type="checkbox"
+                              checked={system.in_usage !== false}
+                              onChange={() => handleToggleUsageStatus(system.id, system.in_usage !== false)}
+                            />
+                            <span className="toggle-slider"></span>
+                            <span className="toggle-label">
+                              {system.in_usage !== false ? 'In Usage' : 'Not In Usage'}
+                            </span>
+                          </label>
+                        </div>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => handleDeleteSystem(system.id)}
+                          style={{ marginLeft: 'auto' }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      {system.description && (
+                        <p className="system-description">{system.description}</p>
+                      )}
+                      <div className="system-usage">
+                        <label>Usage Time (hours):</label>
+                        <input
+                          type="number"
+                          value={system.usage_time || 0}
+                          onChange={(e) => handleUpdateUsageTime(system.id, e.target.value)}
+                          step="0.1"
+                          min="0"
+                          style={{
+                            width: '100%',
+                            padding: '0.5rem',
+                            marginTop: '0.5rem',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '4px'
+                          }}
+                        />
+                      </div>
+                      <div className="system-usage" style={{ marginTop: '1rem' }}>
+                        <label>Time Since Last Maintenance (hours):</label>
+                        <input
+                          type="number"
+                          value={(system.time_since_last_maintenance || 0).toFixed(2)}
+                          readOnly
+                          disabled
+                          style={{
+                            width: '100%',
+                            padding: '0.5rem',
+                            marginTop: '0.5rem',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '4px',
+                            backgroundColor: '#f3f4f6',
+                            color: '#6b7280',
+                            cursor: 'not-allowed'
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Linked Parts and Subsystems */}
+                      <div className="system-links" style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f3f4f6' }}>
+                        <div style={{ marginBottom: '0.5rem' }}>
+                          <strong>Linked Parts:</strong> {systemParts[system.id]?.length || 0}
+                        </div>
+                        <div style={{ marginBottom: '0.5rem' }}>
+                          <strong>Linked Subsystems:</strong> {systemSubsystems[system.id]?.length || 0}
+                        </div>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => openLinkPartsModal(system)}
+                          style={{ width: '100%', marginTop: '0.5rem' }}
+                        >
+                          Link Parts/Subsystems
+                        </button>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={() => openSystemDetails(system)}
+                          style={{ width: '100%', marginTop: '0.5rem' }}
+                        >
+                          View Details
+                        </button>
+                      </div>
 
-                  <div className="system-meta">
-                    <small>Created: {new Date(system.created_at).toLocaleDateString()}</small>
-                    {system.updated_at && (
-                      <small>Updated: {new Date(system.updated_at).toLocaleDateString()}</small>
-                    )}
-                  </div>
+                      <div className="system-meta">
+                        <small>Created: {new Date(system.created_at).toLocaleDateString()}</small>
+                        {system.updated_at && (
+                          <small>Updated: {new Date(system.updated_at).toLocaleDateString()}</small>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {systems.filter(s => s.in_usage !== false).length === 0 && (
+                    <div className="empty-category">
+                      <p>No systems in usage. Drag systems here to mark them as in usage.</p>
+                    </div>
+                  )}
                 </div>
-              ))}
+              </div>
+
+              {/* Not in Usage Category */}
+              <div className="system-category">
+                <h4 className="category-header">Not in Usage</h4>
+                <div 
+                  className="systems-grid category-drop-zone"
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={(e) => handleDrop(e, 'not-in-usage')}
+                >
+                  {systems.filter(s => s.in_usage === false).map((system) => (
+                    <div 
+                      key={system.id} 
+                      className="system-card draggable-system"
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, system.id)}
+                    >
+                      <div className="system-card-header">
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', flex: 1 }}>
+                          <h3 style={{ margin: 0 }}>{system.name}</h3>
+                          <label className="usage-toggle-switch">
+                            <input
+                              type="checkbox"
+                              checked={system.in_usage !== false}
+                              onChange={() => handleToggleUsageStatus(system.id, system.in_usage !== false)}
+                            />
+                            <span className="toggle-slider"></span>
+                            <span className="toggle-label">
+                              {system.in_usage !== false ? 'In Usage' : 'Not In Usage'}
+                            </span>
+                          </label>
+                        </div>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => handleDeleteSystem(system.id)}
+                          style={{ marginLeft: 'auto' }}
+                        >
+                          Delete
+                        </button>
+                      </div>
+                      {system.description && (
+                        <p className="system-description">{system.description}</p>
+                      )}
+                      <div className="system-usage">
+                        <label>Usage Time (hours):</label>
+                        <input
+                          type="number"
+                          value={system.usage_time || 0}
+                          onChange={(e) => handleUpdateUsageTime(system.id, e.target.value)}
+                          step="0.1"
+                          min="0"
+                          style={{
+                            width: '100%',
+                            padding: '0.5rem',
+                            marginTop: '0.5rem',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '4px'
+                          }}
+                        />
+                      </div>
+                      <div className="system-usage" style={{ marginTop: '1rem' }}>
+                        <label>Time Since Last Maintenance (hours):</label>
+                        <input
+                          type="number"
+                          value={(system.time_since_last_maintenance || 0).toFixed(2)}
+                          readOnly
+                          disabled
+                          style={{
+                            width: '100%',
+                            padding: '0.5rem',
+                            marginTop: '0.5rem',
+                            border: '1px solid #d1d5db',
+                            borderRadius: '4px',
+                            backgroundColor: '#f3f4f6',
+                            color: '#6b7280',
+                            cursor: 'not-allowed'
+                          }}
+                        />
+                      </div>
+                      
+                      {/* Linked Parts and Subsystems */}
+                      <div className="system-links" style={{ marginTop: '1rem', paddingTop: '1rem', borderTop: '1px solid #f3f4f6' }}>
+                        <div style={{ marginBottom: '0.5rem' }}>
+                          <strong>Linked Parts:</strong> {systemParts[system.id]?.length || 0}
+                        </div>
+                        <div style={{ marginBottom: '0.5rem' }}>
+                          <strong>Linked Subsystems:</strong> {systemSubsystems[system.id]?.length || 0}
+                        </div>
+                        <button
+                          className="btn btn-secondary btn-sm"
+                          onClick={() => openLinkPartsModal(system)}
+                          style={{ width: '100%', marginTop: '0.5rem' }}
+                        >
+                          Link Parts/Subsystems
+                        </button>
+                        <button
+                          className="btn btn-primary btn-sm"
+                          onClick={() => openSystemDetails(system)}
+                          style={{ width: '100%', marginTop: '0.5rem' }}
+                        >
+                          View Details
+                        </button>
+                      </div>
+
+                      <div className="system-meta">
+                        <small>Created: {new Date(system.created_at).toLocaleDateString()}</small>
+                        {system.updated_at && (
+                          <small>Updated: {new Date(system.updated_at).toLocaleDateString()}</small>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                  {systems.filter(s => s.in_usage === false).length === 0 && (
+                    <div className="empty-category">
+                      <p>No systems not in usage. Drag systems here to mark them as not in usage.</p>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
           )}
         </>
