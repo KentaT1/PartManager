@@ -5,14 +5,14 @@
   "private": true,
   "homepage": "https://kentat1.github.io/PartManager",
   "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
     "react-scripts": "5.0.1",
-    "@supabase/supabase-js": "^2.38.4",
-    "react-router-dom": "^6.20.0"
+    "@supabase/supabase-js": "^2.89.0",
+    "react-router-dom": "^7.11.0"
   },
   "scripts": {
-    "start": "react-scripts start",
+    "start": "BROWSER=none react-scripts start",
     "build": "react-scripts build",
     "test": "react-scripts test",
     "eject": "react-scripts eject",
@@ -37,7 +37,7 @@
     ]
   },
   "devDependencies": {
-    "gh-pages": "^6.1.0"
+    "gh-pages": "^6.3.0"
   }
 }
 
