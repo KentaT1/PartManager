@@ -6,13 +6,15 @@ const STATUS_OPTIONS = {
   'ready-to-manufacture': { label: 'Ready to Manufacture', color: '#10b981', bgColor: '#d1fae5' },
   'ready-to-review': { label: 'Ready to Review', color: '#f59e0b', bgColor: '#fef3c7' },
   'reviewed': { label: 'Reviewed', color: '#2563eb', bgColor: '#dbeafe' },
-  'manufactured': { label: 'Manufactured', color: '#6b7280', bgColor: '#f3f4f6' }
+  'manufactured': { label: 'Manufactured', color: '#6b7280', bgColor: '#f3f4f6' },
+  'flagged': { label: 'Flagged', color: '#dc2626', bgColor: '#fee2e2' }
 };
 
 const COTS_STATUS_OPTIONS = {
   'not-bought': { label: 'Not Bought', color: '#dc2626', bgColor: '#fee2e2' },
   'bought': { label: 'Bought', color: '#f59e0b', bgColor: '#fef3c7' },
-  'received': { label: 'Received', color: '#10b981', bgColor: '#d1fae5' }
+  'received': { label: 'Received', color: '#10b981', bgColor: '#d1fae5' },
+  'flagged': { label: 'Flagged', color: '#dc2626', bgColor: '#fee2e2' }
 };
 
 // Helper function to check if a part number indicates COTS
@@ -23,12 +25,45 @@ const isCOTSPartNumber = (partNumber) => {
   return cotsPatterns.test(partNumber.trim());
 };
 
+// Helper function to detect vendor from part number
+const detectVendorFromPartNumber = (partNumber) => {
+  if (!partNumber) return 'Unknown';
+  const partNum = partNumber.trim().toUpperCase();
+  
+  // WCP (West Coast Products) - starts with WCP-
+  if (/^WCP-/.test(partNum)) return 'WCP';
+  
+  // REV Robotics - starts with REV-
+  if (/^REV-/.test(partNum)) return 'REV Robotics';
+  
+  // AndyMark - starts with am-
+  if (/^AM-/.test(partNum)) return 'AndyMark';
+  
+  // VEX Robotics - starts with 217-
+  if (/^217-/.test(partNum)) return 'VEX Robotics';
+  
+  // McMaster-Carr - typically 5-7 digits, may have letter suffix (e.g., 97035K42, 94615A123)
+  // Pattern: 5-7 digits optionally followed by 1-2 letters and more digits
+  if (/^\d{5,7}([A-Z]\d+)?$/.test(partNum)) return 'McMaster-Carr';
+  
+  // Generic numeric patterns (could be various vendors)
+  if (/^\d+$/.test(partNum)) return 'Other (Numeric)';
+  
+  return 'Other';
+};
+
 function PartsManager() {
-  const [mainView, setMainView] = useState('parts'); // 'parts' or 'manufacturing'
+  const [mainView, setMainView] = useState('parts'); // 'parts', 'manufacturing', or 'buylist'
   const [subsystems, setSubsystems] = useState([]);
   const [activeTab, setActiveTab] = useState(null);
   const [parts, setParts] = useState([]);
   const [manufacturingParts, setManufacturingParts] = useState([]);
+  const [cotsParts, setCotsParts] = useState([]);
+  const [vendorFilter, setVendorFilter] = useState('all');
+  const [buyListSearchQuery, setBuyListSearchQuery] = useState('');
+  const [selectedCotsParts, setSelectedCotsParts] = useState([]);
+  const [batchCotsStatus, setBatchCotsStatus] = useState('not-bought');
+  const [showBatchCotsStatusModal, setShowBatchCotsStatusModal] = useState(false);
   const [loading, setLoading] = useState(true);
   const [showAddPart, setShowAddPart] = useState(false);
   const [showAddSubsystemModal, setShowAddSubsystemModal] = useState(false);
@@ -39,11 +74,18 @@ function PartsManager() {
   const [showBatchDeleteModal, setShowBatchDeleteModal] = useState(false);
   const [showUpdatePartTypeModal, setShowUpdatePartTypeModal] = useState(false);
   const [showBatchUpdatePartTypeModal, setShowBatchUpdatePartTypeModal] = useState(false);
+  const [showEditPartModal, setShowEditPartModal] = useState(false);
+  const [editingPart, setEditingPart] = useState(null);
   const [openActionMenu, setOpenActionMenu] = useState(null); // Part ID for which menu is open
   const [alertMessage, setAlertMessage] = useState('');
   const [selectedParts, setSelectedParts] = useState([]);
   const [batchStatus, setBatchStatus] = useState('ready-to-manufacture');
   const [batchPartType, setBatchPartType] = useState(false); // false = not COTS, true = COTS
+  const [partsSearchQuery, setPartsSearchQuery] = useState('');
+  const [partsFlaggedFilter, setPartsFlaggedFilter] = useState('all'); // 'all', 'flagged', 'not-flagged'
+  const [manufacturingSearchQuery, setManufacturingSearchQuery] = useState('');
+  const [manufacturingSubsystemFilter, setManufacturingSubsystemFilter] = useState('all');
+  const [manufacturingPartTypeFilter, setManufacturingPartTypeFilter] = useState('all');
   const [subsystemToDelete, setSubsystemToDelete] = useState(null);
   const [partToDelete, setPartToDelete] = useState(null);
   const [partToUpdateType, setPartToUpdateType] = useState(null);
@@ -51,6 +93,14 @@ function PartsManager() {
   const [showImportBOM, setShowImportBOM] = useState(false);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
   const [selectedPartDetails, setSelectedPartDetails] = useState(null);
+  const [showFlagModal, setShowFlagModal] = useState(false);
+  const [flaggingPart, setFlaggingPart] = useState(null);
+  const [flagNote, setFlagNote] = useState('');
+  const [showFlagNoteModal, setShowFlagNoteModal] = useState(false);
+  const [viewingFlagNote, setViewingFlagNote] = useState(null);
+  const [showQuickAddLinkModal, setShowQuickAddLinkModal] = useState(false);
+  const [partToAddLink, setPartToAddLink] = useState(null);
+  const [quickLinkValue, setQuickLinkValue] = useState('');
   const [newPart, setNewPart] = useState({
     name: '',
     onshape_link: '',
@@ -73,6 +123,7 @@ function PartsManager() {
     if (activeTab) {
       fetchParts(activeTab);
       setSelectedParts([]); // Clear selection when switching tabs
+      setPartsSearchQuery(''); // Clear search when switching tabs
       closeActionMenu(); // Close any open action menus
     }
   }, [activeTab]);
@@ -92,6 +143,13 @@ function PartsManager() {
   useEffect(() => {
     if (mainView === 'manufacturing') {
       fetchManufacturingParts();
+    }
+  }, [mainView]);
+
+  // Fetch COTS parts when buy list view is active
+  useEffect(() => {
+    if (mainView === 'buylist') {
+      fetchCOTSParts();
     }
   }, [mainView]);
 
@@ -158,6 +216,47 @@ function PartsManager() {
     } catch (error) {
       console.error('Error fetching manufacturing parts:', error);
       setManufacturingParts([]);
+    }
+  };
+
+  const fetchCOTSParts = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('parts')
+        .select(`
+          *,
+          subsystems (
+            id,
+            name
+          )
+        `)
+        .eq('is_cots', true)
+        .order('created_at', { ascending: false });
+
+      if (error) throw error;
+      setCotsParts(data || []);
+    } catch (error) {
+      console.error('Error fetching COTS parts:', error);
+      setCotsParts([]);
+    }
+  };
+
+  const handleMarkAsBought = async (partId) => {
+    try {
+      const { error } = await supabase
+        .from('parts')
+        .update({ status: 'bought' })
+        .eq('id', partId);
+
+      if (error) throw error;
+      fetchCOTSParts();
+      // Also refresh parts in parts management view if activeTab exists
+      if (activeTab) {
+        fetchParts(activeTab);
+      }
+    } catch (error) {
+      console.error('Error updating status:', error);
+      showAlert('Error updating status: ' + error.message);
     }
   };
 
@@ -271,10 +370,124 @@ function PartsManager() {
       if (mainView === 'manufacturing') {
         fetchManufacturingParts();
       }
+      if (mainView === 'buylist') {
+        fetchCOTSParts();
+      }
     } catch (error) {
       console.error('Error updating part status:', error);
       showAlert('Error updating part status: ' + error.message);
     }
+  };
+
+  const openQuickAddLinkModal = (partId, partName, isCots = null, partLink = null) => {
+    // Check both regular parts and COTS parts
+    const part = parts.find(p => p.id === partId) || cotsParts.find(p => p.id === partId);
+    // If isCots is explicitly passed, use it; otherwise check the part or default to false
+    const partIsCots = isCots !== null ? isCots : (part?.is_cots || false);
+    // Use provided link, or part's link, or empty string
+    const linkValue = partLink !== null ? partLink : (part?.onshape_link || '');
+    setPartToAddLink({ id: partId, name: partName, isCots: partIsCots });
+    setQuickLinkValue(linkValue);
+    setShowQuickAddLinkModal(true);
+  };
+
+  const closeQuickAddLinkModal = () => {
+    setShowQuickAddLinkModal(false);
+    setPartToAddLink(null);
+    setQuickLinkValue('');
+  };
+
+  const handleQuickAddLink = async (e) => {
+    e.preventDefault();
+    
+    if (!partToAddLink) return;
+    
+    const trimmedLink = quickLinkValue.trim();
+    if (!trimmedLink) {
+      showAlert('Link cannot be empty.');
+      return;
+    }
+
+    try {
+      const { error } = await supabase
+        .from('parts')
+        .update({ onshape_link: trimmedLink })
+        .eq('id', partToAddLink.id);
+
+      if (error) throw error;
+      fetchParts(activeTab);
+      if (mainView === 'manufacturing') {
+        fetchManufacturingParts();
+      }
+      if (mainView === 'buylist') {
+        fetchCOTSParts();
+      }
+      closeQuickAddLinkModal();
+    } catch (error) {
+      console.error('Error updating part link:', error);
+      showAlert('Error updating part link: ' + error.message);
+    }
+  };
+
+  const openFlagModal = (part) => {
+    setFlaggingPart(part);
+    setFlagNote('');
+    setShowFlagModal(true);
+  };
+
+  const closeFlagModal = () => {
+    setShowFlagModal(false);
+    setFlaggingPart(null);
+    setFlagNote('');
+  };
+
+  const handleFlagPart = async () => {
+    if (!flaggingPart || !flagNote.trim()) {
+      showAlert('Please enter a note for the flag');
+      return;
+    }
+
+    try {
+      const currentDetails = flaggingPart.details || {};
+      const { error } = await supabase
+        .from('parts')
+        .update({ 
+          status: 'flagged',
+          details: {
+            ...currentDetails,
+            flag_note: flagNote.trim()
+          }
+        })
+        .eq('id', flaggingPart.id);
+
+      if (error) throw error;
+      
+      // Refresh the appropriate views
+      if (mainView === 'manufacturing') {
+        fetchManufacturingParts();
+      } else if (mainView === 'buylist') {
+        fetchCOTSParts();
+      }
+      if (activeTab) {
+        fetchParts(activeTab);
+      }
+      
+      closeFlagModal();
+    } catch (error) {
+      console.error('Error flagging part:', error);
+      showAlert('Error flagging part: ' + error.message);
+    }
+  };
+
+  const openFlagNoteModal = (part) => {
+    const note = part.details?.flag_note || 'No note available';
+    setViewingFlagNote(note);
+    setShowFlagNoteModal(true);
+  };
+
+  const closeFlagNoteModal = () => {
+    setShowFlagNoteModal(false);
+    setViewingFlagNote(null);
   };
 
   const handleShowDetails = (part) => {
@@ -461,6 +674,49 @@ function PartsManager() {
     }
   };
 
+  const handleSelectCotsPart = (partId) => {
+    setSelectedCotsParts(prev => 
+      prev.includes(partId) 
+        ? prev.filter(id => id !== partId)
+        : [...prev, partId]
+    );
+  };
+
+  const handleSelectAllCots = () => {
+    const filteredParts = vendorFilter === 'all' 
+      ? cotsParts 
+      : cotsParts.filter(p => {
+          const partNum = p.details?.part_number || '';
+          return detectVendorFromPartNumber(partNum) === vendorFilter;
+        });
+    
+    if (selectedCotsParts.length === filteredParts.length) {
+      setSelectedCotsParts([]);
+    } else {
+      setSelectedCotsParts(filteredParts.map(part => part.id));
+    }
+  };
+
+  const handleBatchUpdateCotsStatus = async () => {
+    if (selectedCotsParts.length === 0) return;
+
+    try {
+      const { error } = await supabase
+        .from('parts')
+        .update({ status: batchCotsStatus })
+        .in('id', selectedCotsParts);
+
+      if (error) throw error;
+      
+      fetchCOTSParts();
+      setSelectedCotsParts([]);
+      setShowBatchCotsStatusModal(false);
+    } catch (error) {
+      console.error('Error updating batch COTS status:', error);
+      showAlert('Error updating status: ' + error.message);
+    }
+  };
+
   const handleBatchUpdateStatus = async () => {
     if (selectedParts.length === 0) return;
 
@@ -596,6 +852,108 @@ function PartsManager() {
       const part = parts.find(p => p.id === partId);
       setPartToUpdateType(part);
       setShowUpdatePartTypeModal(true);
+    } else if (action === 'edit') {
+      const part = parts.find(p => p.id === partId);
+      if (part) {
+        setEditingPart({
+          id: part.id,
+          name: part.name || '',
+          onshape_link: part.onshape_link || '',
+          status: part.status || 'ready-to-manufacture',
+          drawn_by: part.drawn_by || '',
+          reviewed_by: part.reviewed_by || '',
+          is_cots: part.is_cots || false,
+          part_number: part.details?.part_number || '',
+          details: {
+            part_number: part.details?.part_number || '',
+            material: part.details?.material || '',
+            weight: part.details?.weight || '',
+            vendor: part.details?.vendor || '',
+            part_quantity: part.details?.part_quantity || '',
+            order_quantity: part.details?.order_quantity || '',
+            order_date: part.details?.order_date || ''
+          }
+        });
+        setShowEditPartModal(true);
+      }
+    }
+  };
+
+  const closeEditPartModal = () => {
+    setShowEditPartModal(false);
+    setEditingPart(null);
+  };
+
+  const handleEditPart = async (e) => {
+    e.preventDefault();
+    
+    if (!isSupabaseConfigured) {
+      showAlert('⚠️ Supabase is not configured!\n\nPlease:\n1. Create a .env.local file\n2. Add your REACT_APP_SUPABASE_URL and REACT_APP_SUPABASE_ANON_KEY\n3. Restart the development server\n\nSee README.md for setup instructions.');
+      return;
+    }
+    
+    if (!editingPart || !editingPart.name.trim()) {
+      showAlert('Please enter a part name');
+      return;
+    }
+
+    const partNumber = editingPart.part_number?.trim() || '';
+    const isCots = editingPart.is_cots || isCOTSPartNumber(partNumber);
+    
+    // Set default status based on COTS if status is not set
+    const defaultStatus = isCots ? 'not-bought' : 'ready-to-manufacture';
+    const status = editingPart.status || defaultStatus;
+
+    try {
+      const { error } = await supabase
+        .from('parts')
+        .update({
+          name: editingPart.name,
+          onshape_link: editingPart.onshape_link,
+          status: status,
+          drawn_by: editingPart.drawn_by,
+          reviewed_by: editingPart.reviewed_by,
+          is_cots: isCots,
+          details: {
+            ...editingPart.details,
+            part_number: partNumber,
+            material: editingPart.details.material || '',
+            weight: editingPart.details.weight || '',
+            vendor: editingPart.details.vendor || '',
+            part_quantity: editingPart.details.part_quantity || '',
+            order_quantity: editingPart.details.order_quantity || '',
+            order_date: editingPart.details.order_date || ''
+          }
+        })
+        .eq('id', editingPart.id);
+
+      if (error) {
+        throw new Error(error.message || 'Database error. Make sure you have run the SQL schema in Supabase.');
+      }
+
+      // Refresh parts list
+      fetchParts(activeTab);
+      if (mainView === 'manufacturing') {
+        fetchManufacturingParts();
+      }
+      if (mainView === 'buylist') {
+        fetchCOTSParts();
+      }
+      
+      closeEditPartModal();
+    } catch (error) {
+      console.error('Error editing part:', error);
+      let errorMessage = 'Error editing part: ';
+      
+      if (error.message.includes('Failed to fetch')) {
+        errorMessage += 'Cannot connect to Supabase. Check your internet connection and Supabase credentials.';
+      } else if (error.message.includes('relation') || error.message.includes('does not exist')) {
+        errorMessage += 'Database tables not found. Please run the SQL schema from database/schema.sql in your Supabase SQL Editor.';
+      } else {
+        errorMessage += error.message;
+      }
+      
+      showAlert(errorMessage);
     }
   };
 
@@ -753,6 +1111,12 @@ function PartsManager() {
         >
           Manufacturing Dashboard
         </button>
+        <button
+          className={`main-view-tab ${mainView === 'buylist' ? 'active' : ''}`}
+          onClick={() => setMainView('buylist')}
+        >
+          Buy List
+        </button>
       </div>
 
       {/* Parts Management View */}
@@ -900,9 +1264,10 @@ function PartsManager() {
                   }}
                 >
                   <optgroup label="Manufacturing Status">
-                    {Object.entries(STATUS_OPTIONS).map(([value, { label }]) => (
+                    {Object.entries(STATUS_OPTIONS).filter(([value]) => value !== 'flagged').map(([value, { label }]) => (
                       <option key={value} value={value}>{label}</option>
                     ))}
+                    <option value="flagged">Flagged</option>
                   </optgroup>
                   <optgroup label="COTS Status">
                     {Object.entries(COTS_STATUS_OPTIONS).map(([value, { label }]) => (
@@ -1169,6 +1534,207 @@ function PartsManager() {
         </div>
       )}
 
+      {/* Edit Part Modal */}
+      {showEditPartModal && editingPart && (
+        <div className="modal-overlay" onClick={closeEditPartModal}>
+          <div className="modal-content" style={{ maxWidth: '800px' }} onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Edit Part: {editingPart.name}</h3>
+              <button className="modal-close" onClick={closeEditPartModal}>
+                ×
+              </button>
+            </div>
+            <form onSubmit={handleEditPart} className="modal-form">
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Part Name *</label>
+                  <input
+                    type="text"
+                    value={editingPart.name}
+                    onChange={(e) => setEditingPart({ ...editingPart, name: e.target.value })}
+                    required
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Part Number</label>
+                  <input
+                    type="text"
+                    value={editingPart.part_number || ''}
+                    onChange={(e) => {
+                      const partNum = e.target.value;
+                      const isCots = isCOTSPartNumber(partNum);
+                      setEditingPart({ 
+                        ...editingPart, 
+                        part_number: partNum,
+                        is_cots: isCots,
+                        status: isCots && !editingPart.is_cots ? (editingPart.status === 'ready-to-manufacture' ? 'not-bought' : editingPart.status) : editingPart.status,
+                        details: { ...editingPart.details, part_number: partNum }
+                      });
+                    }}
+                    placeholder="WCP-1234, REV-5678, etc."
+                  />
+                </div>
+                <div className="form-group">
+                  <label>{editingPart.is_cots ? 'Link' : 'OnShape Link'}</label>
+                  <input
+                    type="url"
+                    value={editingPart.onshape_link || ''}
+                    onChange={(e) => setEditingPart({ ...editingPart, onshape_link: e.target.value })}
+                    placeholder={editingPart.is_cots ? "https://..." : "https://cad.onshape.com/..."}
+                  />
+                  {editingPart.is_cots && (
+                    <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '0.5rem', marginBottom: 0 }}>
+                      Enter any website link (vendor page, product page, etc.)
+                    </p>
+                  )}
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={editingPart.is_cots}
+                      onChange={(e) => {
+                        const isCots = e.target.checked;
+                        setEditingPart({ 
+                          ...editingPart, 
+                          is_cots: isCots,
+                          status: isCots ? 'not-bought' : 'ready-to-manufacture'
+                        });
+                      }}
+                      style={{ marginRight: '0.5rem' }}
+                    />
+                    COTS (Commercial Off The Shelf)
+                  </label>
+                </div>
+                <div className="form-group">
+                  <label>Status</label>
+                  <select
+                    value={editingPart.status}
+                    onChange={(e) => setEditingPart({ ...editingPart, status: e.target.value })}
+                  >
+                    {editingPart.is_cots ? (
+                      Object.entries(COTS_STATUS_OPTIONS).map(([value, { label }]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))
+                    ) : (
+                      Object.entries(STATUS_OPTIONS).map(([value, { label }]) => (
+                        <option key={value} value={value}>{label}</option>
+                      ))
+                    )}
+                  </select>
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Material</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.material || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, material: e.target.value }
+                    })}
+                    placeholder="e.g., 6061-T6 Aluminum"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Weight</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.weight || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, weight: e.target.value }
+                    })}
+                    placeholder="e.g., 0.5 lb"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Vendor</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.vendor || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, vendor: e.target.value }
+                    })}
+                    placeholder="e.g., West Coast Products"
+                  />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Part Quantity</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.part_quantity || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, part_quantity: e.target.value }
+                    })}
+                    placeholder="e.g., 4"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Order Quantity</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.order_quantity || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, order_quantity: e.target.value }
+                    })}
+                    placeholder="e.g., 10"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Order Date</label>
+                  <input
+                    type="text"
+                    value={editingPart.details.order_date || ''}
+                    onChange={(e) => setEditingPart({ 
+                      ...editingPart, 
+                      details: { ...editingPart.details, order_date: e.target.value }
+                    })}
+                    placeholder="e.g., 2024-01-15"
+                  />
+                </div>
+              </div>
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Drawn By</label>
+                  <input
+                    type="text"
+                    value={editingPart.drawn_by || ''}
+                    onChange={(e) => setEditingPart({ ...editingPart, drawn_by: e.target.value })}
+                    placeholder="Student name"
+                  />
+                </div>
+                <div className="form-group">
+                  <label>Reviewed By</label>
+                  <input
+                    type="text"
+                    value={editingPart.reviewed_by || ''}
+                    onChange={(e) => setEditingPart({ ...editingPart, reviewed_by: e.target.value })}
+                    placeholder="Mentor name"
+                  />
+                </div>
+              </div>
+              <div className="modal-actions">
+                <button type="button" onClick={closeEditPartModal} className="btn btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
       {/* Import BOM Modal */}
       {showImportBOM && (
         <div className="modal-overlay" onClick={() => setShowImportBOM(false)}>
@@ -1249,7 +1815,18 @@ function PartsManager() {
       {activeTab && (
         <div className="parts-content">
           <div className="parts-header">
-            <h3>{subsystems.find(s => s.id === activeTab)?.name} Parts</h3>
+            <div className="parts-header-left">
+              <h3>{subsystems.find(s => s.id === activeTab)?.name} Parts</h3>
+              <div className="parts-search-container">
+                <input
+                  type="text"
+                  className="parts-search-input"
+                  placeholder="Search parts..."
+                  value={partsSearchQuery}
+                  onChange={(e) => setPartsSearchQuery(e.target.value)}
+                />
+              </div>
+            </div>
             <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
               <button
                 onClick={() => setShowImportBOM(true)}
@@ -1263,6 +1840,37 @@ function PartsManager() {
               >
                 {showAddPart ? 'Cancel' : '+ Add Part'}
               </button>
+            </div>
+          </div>
+
+          {/* Parts Filter Bar */}
+          <div className="manufacturing-filters" style={{ marginTop: '1rem', marginBottom: '1rem' }}>
+            <div className="filter-group">
+              <label htmlFor="parts-flagged-filter">Filter by Flag Status:</label>
+              <select
+                id="parts-flagged-filter"
+                value={partsFlaggedFilter}
+                onChange={(e) => setPartsFlaggedFilter(e.target.value)}
+                className="vendor-filter-select"
+              >
+                <option value="all">All Parts</option>
+                <option value="flagged">Flagged Only</option>
+                <option value="not-flagged">Not Flagged</option>
+              </select>
+            </div>
+            <div style={{ 
+              display: 'flex', 
+              alignItems: 'center', 
+              gap: '0.5rem',
+              marginLeft: 'auto',
+              padding: '0.5rem 1rem',
+              backgroundColor: '#fee2e2',
+              borderRadius: '8px',
+              border: '1px solid #dc2626'
+            }}>
+              <span style={{ fontWeight: '600', color: '#dc2626' }}>
+                🚩 Flagged: {parts.filter(p => p.status === 'flagged').length}
+              </span>
             </div>
           </div>
 
@@ -1455,22 +2063,47 @@ function PartsManager() {
               <div className="empty-state">
                 <p>No parts in this subsystem yet. Add one to get started!</p>
               </div>
-            ) : (
-              <table className="parts-table">
-                <thead>
-                  <tr>
-                    <th className="checkbox-column"></th>
-                    <th>Part Name</th>
-                    <th>OnShape Link</th>
-                    <th>Status</th>
-                    <th>Drawn By</th>
-                    <th>Reviewed By</th>
-                    <th>Details</th>
-                    <th>Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {parts.map((part) => (
+            ) : (() => {
+              // Filter parts based on flagged status
+              let filteredParts = parts;
+              if (partsFlaggedFilter === 'flagged') {
+                filteredParts = filteredParts.filter(part => part.status === 'flagged');
+              } else if (partsFlaggedFilter === 'not-flagged') {
+                filteredParts = filteredParts.filter(part => part.status !== 'flagged');
+              }
+
+              // Filter parts based on search query
+              if (partsSearchQuery.trim() !== '') {
+                filteredParts = filteredParts.filter(part => 
+                  part.name.toLowerCase().includes(partsSearchQuery.toLowerCase()) ||
+                  (part.details?.part_number || '').toLowerCase().includes(partsSearchQuery.toLowerCase()) ||
+                  (part.drawn_by || '').toLowerCase().includes(partsSearchQuery.toLowerCase()) ||
+                  (part.reviewed_by || '').toLowerCase().includes(partsSearchQuery.toLowerCase()) ||
+                  (part.details?.vendor || '').toLowerCase().includes(partsSearchQuery.toLowerCase())
+                );
+              }
+
+              return filteredParts.length === 0 ? (
+                <div className="empty-state">
+                  <p>No parts found matching "{partsSearchQuery}".</p>
+                </div>
+              ) : (
+                <table className="parts-table">
+                  <thead>
+                    <tr>
+                      <th className="checkbox-column"></th>
+                      <th>Part Name</th>
+                      <th>OnShape Link</th>
+                      <th>Status</th>
+                      <th>Drawn By</th>
+                      <th>Reviewed By</th>
+                      <th>Details</th>
+                      <th>Notes</th>
+                      <th>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredParts.map((part) => (
                     <tr key={part.id} className={selectedParts.includes(part.id) ? 'selected' : ''}>
                       <td className="checkbox-column">
                         <input
@@ -1491,7 +2124,13 @@ function PartsManager() {
                             View Drawing
                           </a>
                         ) : (
-                          <span className="no-link">No link</span>
+                          <button
+                            onClick={() => openQuickAddLinkModal(part.id, part.name)}
+                            className="btn-quick-add-link"
+                            title="Add Onshape link"
+                          >
+                            Add Link
+                          </button>
                         )}
                       </td>
                       <td>
@@ -1539,6 +2178,22 @@ function PartsManager() {
                         )}
                       </td>
                       <td>
+                        {part.status === 'flagged' && part.details?.flag_note && (
+                          <button
+                            onClick={() => openFlagNoteModal(part)}
+                            className="btn btn-secondary btn-sm"
+                            title="View flag note"
+                            style={{
+                              backgroundColor: '#fee2e2',
+                              color: '#dc2626',
+                              borderColor: '#dc2626'
+                            }}
+                          >
+                            🚩 Flag Note
+                          </button>
+                        )}
+                      </td>
+                      <td>
                         <div className="action-menu-wrapper">
                           <button
                             onClick={(e) => openActionMenuForPart(part.id, e)}
@@ -1549,6 +2204,11 @@ function PartsManager() {
                           </button>
                           {openActionMenu === part.id && (
                             <div className="action-menu">
+                              <button
+                                onClick={() => handleActionMenuClick(part.id, 'edit')}
+                              >
+                                Edit
+                              </button>
                               <button
                                 onClick={() => handleActionMenuClick(part.id, 'updateType')}
                               >
@@ -1564,10 +2224,11 @@ function PartsManager() {
                         </div>
                       </td>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            )}
+                    ))}
+                  </tbody>
+                </table>
+              );
+            })()}
           </div>
         </div>
       )}
@@ -1587,15 +2248,94 @@ function PartsManager() {
             </div>
           </div>
 
+          {/* Search and Filters */}
+          <div className="manufacturing-filters">
+            <div className="parts-search-container" style={{ maxWidth: '400px' }}>
+              <input
+                type="text"
+                className="parts-search-input"
+                placeholder="Search parts..."
+                value={manufacturingSearchQuery}
+                onChange={(e) => setManufacturingSearchQuery(e.target.value)}
+              />
+            </div>
+            <div className="filter-group">
+              <label htmlFor="manufacturing-subsystem-filter">Subsystem:</label>
+              <select
+                id="manufacturing-subsystem-filter"
+                value={manufacturingSubsystemFilter}
+                onChange={(e) => setManufacturingSubsystemFilter(e.target.value)}
+                className="vendor-filter-select"
+              >
+                <option value="all">All Subsystems</option>
+                {[...new Set(manufacturingParts.map(p => p.subsystems?.name).filter(Boolean))].sort().map(subsystem => (
+                  <option key={subsystem} value={subsystem}>{subsystem}</option>
+                ))}
+              </select>
+            </div>
+            <div className="filter-group">
+              <label htmlFor="manufacturing-part-type-filter">Part Type:</label>
+              <select
+                id="manufacturing-part-type-filter"
+                value={manufacturingPartTypeFilter}
+                onChange={(e) => setManufacturingPartTypeFilter(e.target.value)}
+                className="vendor-filter-select"
+              >
+                <option value="all">All Types</option>
+                <option value="hex">Hex</option>
+                <option value="tube">Tube</option>
+                <option value="plate">Plate</option>
+                <option value="bracket">Bracket</option>
+                <option value="mount">Mount</option>
+                <option value="spacer">Spacer</option>
+                <option value="bushing">Bushing</option>
+              </select>
+            </div>
+          </div>
+
           <div className="manufacturing-orders">
             <h3>Parts Ready to Manufacture</h3>
             {manufacturingParts.length === 0 ? (
               <div className="empty-state">
                 <p>No parts ready to manufacture. All parts are either in review or already manufactured.</p>
               </div>
-            ) : (
-              <div className="order-grid">
-                {manufacturingParts.map((part) => (
+            ) : (() => {
+              // Filter parts based on search query, subsystem, and part type
+              let filteredParts = manufacturingParts;
+
+              // Apply subsystem filter
+              if (manufacturingSubsystemFilter !== 'all') {
+                filteredParts = filteredParts.filter(part => 
+                  part.subsystems?.name === manufacturingSubsystemFilter
+                );
+              }
+
+              // Apply part type filter (checks if the part name contains the type)
+              if (manufacturingPartTypeFilter !== 'all') {
+                filteredParts = filteredParts.filter(part => 
+                  part.name.toLowerCase().includes(manufacturingPartTypeFilter.toLowerCase())
+                );
+              }
+
+              // Apply search filter
+              if (manufacturingSearchQuery.trim() !== '') {
+                const searchLower = manufacturingSearchQuery.toLowerCase();
+                filteredParts = filteredParts.filter(part => 
+                  part.name.toLowerCase().includes(searchLower) ||
+                  (part.subsystems?.name || '').toLowerCase().includes(searchLower) ||
+                  (part.drawn_by || '').toLowerCase().includes(searchLower) ||
+                  (part.reviewed_by || '').toLowerCase().includes(searchLower) ||
+                  (part.details?.part_number || '').toLowerCase().includes(searchLower)
+                );
+              }
+
+              return filteredParts.length === 0 ? (
+                <div className="empty-state">
+                  <p>No parts found matching your filters.</p>
+                </div>
+              ) : (
+                <div className="order-grid">
+                  {filteredParts.map((part) => (
                   <div key={part.id} className="order-card">
                     <div className="order-card-header">
                       <h4>{part.name}</h4>
@@ -1614,7 +2354,13 @@ function PartsManager() {
                           View Drawing →
                         </a>
                       ) : (
-                        <span className="no-link">No drawing link</span>
+                        <button
+                          onClick={() => openQuickAddLinkModal(part.id, part.name)}
+                          className="btn-quick-add-link"
+                          title="Add Onshape link"
+                        >
+                          Add Link
+                        </button>
                       )}
                       {part.drawn_by && (
                         <div className="order-meta">
@@ -1652,11 +2398,508 @@ function PartsManager() {
                       >
                         Mark as Manufactured
                       </button>
+                      <button
+                        onClick={() => openFlagModal(part)}
+                        className="btn btn-secondary btn-sm"
+                        style={{ marginLeft: '0.5rem' }}
+                      >
+                        Flag
+                      </button>
                     </div>
                   </div>
-                ))}
+                  ))}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Buy List View */}
+      {mainView === 'buylist' && (
+        <div className="buy-list-dashboard">
+          <div className="buy-list-header">
+            <h2>Buy List</h2>
+            <div className="buy-list-stats">
+              <div className="stat-card">
+                <div className="stat-value">{cotsParts.length}</div>
+                <div className="stat-label">COTS Items</div>
               </div>
-            )}
+              <div className="stat-card">
+                <div className="stat-value">
+                  {cotsParts.filter(p => p.status === 'not-bought').length}
+                </div>
+                <div className="stat-label">Not Bought</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="buy-list-filters">
+            <div className="parts-search-container" style={{ maxWidth: '400px' }}>
+              <input
+                type="text"
+                className="parts-search-input"
+                placeholder="Search parts..."
+                value={buyListSearchQuery}
+                onChange={(e) => {
+                  setBuyListSearchQuery(e.target.value);
+                  setSelectedCotsParts([]); // Clear selection when search changes
+                }}
+              />
+            </div>
+            <div className="filter-group">
+              <label htmlFor="vendor-filter">Filter by Vendor:</label>
+              <select
+                id="vendor-filter"
+                value={vendorFilter}
+                onChange={(e) => {
+                  setVendorFilter(e.target.value);
+                  setSelectedCotsParts([]); // Clear selection when filter changes
+                }}
+                className="vendor-filter-select"
+              >
+                <option value="all">All Vendors</option>
+                {[...new Set(cotsParts.map(p => {
+                  const partNum = p.details?.part_number || '';
+                  return detectVendorFromPartNumber(partNum);
+                }))].sort().map(vendor => (
+                  <option key={vendor} value={vendor}>{vendor}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+
+          {/* Batch Actions Toolbar */}
+          {selectedCotsParts.length > 0 && (
+            <div className="batch-actions-toolbar">
+              <div className="batch-actions-info">
+                <strong>{selectedCotsParts.length}</strong> item{selectedCotsParts.length !== 1 ? 's' : ''} selected
+              </div>
+              <div className="batch-actions-buttons">
+                <button
+                  onClick={() => setShowBatchCotsStatusModal(true)}
+                  className="btn btn-secondary btn-sm"
+                >
+                  Update Status
+                </button>
+                <button
+                  onClick={() => setSelectedCotsParts([])}
+                  className="btn btn-secondary btn-sm"
+                >
+                  Clear Selection
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="buy-list-content">
+            {cotsParts.length === 0 ? (
+              <div className="empty-state">
+                <p>No COTS items found. Add parts marked as COTS to see them here.</p>
+              </div>
+            ) : (() => {
+              // Filter parts based on vendor and search query
+              let filteredParts = vendorFilter === 'all' 
+                ? cotsParts 
+                : cotsParts.filter(p => {
+                    const partNum = p.details?.part_number || '';
+                    return detectVendorFromPartNumber(partNum) === vendorFilter;
+                  });
+
+              // Apply search filter
+              if (buyListSearchQuery.trim() !== '') {
+                const searchLower = buyListSearchQuery.toLowerCase();
+                filteredParts = filteredParts.filter(p => {
+                  const partNum = p.details?.part_number || '';
+                  const vendor = detectVendorFromPartNumber(partNum);
+                  return (
+                    p.name.toLowerCase().includes(searchLower) ||
+                    (p.subsystems?.name || '').toLowerCase().includes(searchLower) ||
+                    partNum.toLowerCase().includes(searchLower) ||
+                    vendor.toLowerCase().includes(searchLower) ||
+                    (p.details?.material || '').toLowerCase().includes(searchLower) ||
+                    (p.details?.vendor || '').toLowerCase().includes(searchLower)
+                  );
+                });
+              }
+
+              return filteredParts.length === 0 ? (
+                <div className="empty-state">
+                  <p>No items found matching your search and filters.</p>
+                </div>
+              ) : (
+                <div className="buy-list-table-container">
+                  <table className="buy-list-table">
+                    <thead>
+                      <tr>
+                        <th className="checkbox-column">
+                          <input
+                            type="checkbox"
+                            checked={filteredParts.length > 0 && selectedCotsParts.length === filteredParts.length}
+                            onChange={handleSelectAllCots}
+                            title="Select all"
+                          />
+                        </th>
+                        <th>Part Name</th>
+                        <th>Qty</th>
+                        <th>Part Number</th>
+                        <th>Vendor</th>
+                        <th>Link</th>
+                        <th>Status</th>
+                        <th>Details</th>
+                        <th>Flag</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredParts.map((part) => {
+                        const partNumber = part.details?.part_number || '';
+                        const vendor = detectVendorFromPartNumber(partNumber);
+                        const qty = part.details?.order_quantity || part.details?.part_quantity || '-';
+                        
+                        return (
+                          <tr key={part.id} className={selectedCotsParts.includes(part.id) ? 'selected' : ''}>
+                            <td className="checkbox-column">
+                              <input
+                                type="checkbox"
+                                checked={selectedCotsParts.includes(part.id)}
+                                onChange={() => handleSelectCotsPart(part.id)}
+                              />
+                            </td>
+                            <td>{part.name}</td>
+                            <td>{qty}</td>
+                            <td>{partNumber || '-'}</td>
+                            <td>{vendor}</td>
+                            <td>
+                              {part.onshape_link ? (
+                                <a
+                                  href={part.onshape_link}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="link"
+                                >
+                                  View Link
+                                </a>
+                              ) : (
+                                <button
+                                  onClick={() => openQuickAddLinkModal(part.id, part.name, true, part.onshape_link || '')}
+                                  className="btn-quick-add-link"
+                                  title="Add link"
+                                >
+                                  Add Link
+                                </button>
+                              )}
+                            </td>
+                            <td>
+                              <select
+                                value={part.status}
+                                onChange={(e) => handleUpdatePartStatus(part.id, e.target.value)}
+                                className="status-select"
+                                style={{
+                                  backgroundColor: COTS_STATUS_OPTIONS[part.status]?.bgColor || '#f3f4f6',
+                                  color: COTS_STATUS_OPTIONS[part.status]?.color || '#1a1a1a',
+                                  borderColor: COTS_STATUS_OPTIONS[part.status]?.color || '#d1d5db'
+                                }}
+                              >
+                                {Object.entries(COTS_STATUS_OPTIONS).map(([value, { label }]) => (
+                                  <option key={value} value={value}>{label}</option>
+                                ))}
+                              </select>
+                            </td>
+                            <td>
+                              <button
+                                onClick={() => handleShowDetails(part)}
+                                className="btn btn-secondary btn-sm"
+                                title="View part details"
+                              >
+                                Details
+                              </button>
+                            </td>
+                            <td>
+                              <button
+                                onClick={() => openFlagModal(part)}
+                                className="btn btn-secondary btn-sm"
+                                title="Flag this item"
+                              >
+                                Flag
+                              </button>
+                              {part.status === 'flagged' && part.details?.flag_note && (
+                                <button
+                                  onClick={() => openFlagNoteModal(part)}
+                                  className="btn btn-secondary btn-sm"
+                                  title="View flag note"
+                                  style={{
+                                    marginLeft: '0.25rem',
+                                    backgroundColor: '#fee2e2',
+                                    color: '#dc2626',
+                                    borderColor: '#dc2626'
+                                  }}
+                                >
+                                  🚩
+                                </button>
+                              )}
+                            </td>
+                            <td>
+                              {part.status === 'not-bought' && (
+                                <button
+                                  onClick={() => handleMarkAsBought(part.id)}
+                                  className="btn btn-primary btn-sm"
+                                  title="Mark as bought"
+                                >
+                                  Mark as Bought
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Flag Modal */}
+      {showFlagModal && flaggingPart && (
+        <div className="modal-overlay" onClick={closeFlagModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Flag Part: {flaggingPart.name}</h3>
+              <button className="modal-close" onClick={closeFlagModal}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <div className="form-group">
+                <label>Flag Note *</label>
+                {mainView === 'buylist' && (
+                  <div style={{ 
+                    display: 'flex', 
+                    gap: '0.5rem', 
+                    marginBottom: '0.75rem',
+                    flexWrap: 'wrap'
+                  }}>
+                    <button
+                      type="button"
+                      onClick={() => setFlagNote('Out of Stock')}
+                      style={{
+                        padding: '0.375rem 0.875rem',
+                        borderRadius: '9999px',
+                        border: '1px solid #d1d5db',
+                        backgroundColor: '#ffffff',
+                        color: '#1a1a1a',
+                        fontSize: '0.8125rem',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontWeight: '500',
+                        transition: 'all 0.2s ease',
+                        lineHeight: '1.25'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.target.style.backgroundColor = '#f3f4f6';
+                        e.target.style.borderColor = '#2563eb';
+                        e.target.style.color = '#2563eb';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.target.style.backgroundColor = '#ffffff';
+                        e.target.style.borderColor = '#d1d5db';
+                        e.target.style.color = '#1a1a1a';
+                      }}
+                    >
+                      Out of Stock
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setFlagNote('Wrong ID')}
+                      style={{
+                        padding: '0.375rem 0.875rem',
+                        borderRadius: '9999px',
+                        border: '1px solid #d1d5db',
+                        backgroundColor: '#ffffff',
+                        color: '#1a1a1a',
+                        fontSize: '0.8125rem',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontWeight: '500',
+                        transition: 'all 0.2s ease',
+                        lineHeight: '1.25'
+                      }}
+                      onMouseEnter={(e) => {
+                        e.target.style.backgroundColor = '#f3f4f6';
+                        e.target.style.borderColor = '#2563eb';
+                        e.target.style.color = '#2563eb';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.target.style.backgroundColor = '#ffffff';
+                        e.target.style.borderColor = '#d1d5db';
+                        e.target.style.color = '#1a1a1a';
+                      }}
+                    >
+                      Wrong ID
+                    </button>
+                  </div>
+                )}
+                <textarea
+                  value={flagNote}
+                  onChange={(e) => setFlagNote(e.target.value)}
+                  placeholder="Enter a note explaining why this part is flagged..."
+                  rows={5}
+                  style={{
+                    width: '100%',
+                    padding: '0.875rem',
+                    border: '1px solid #d1d5db',
+                    borderRadius: '8px',
+                    fontFamily: 'inherit',
+                    fontSize: '0.875rem',
+                    resize: 'vertical'
+                  }}
+                  required
+                />
+              </div>
+              <div className="modal-actions">
+                <button 
+                  type="button" 
+                  onClick={closeFlagModal} 
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  onClick={handleFlagPart} 
+                  className="btn btn-primary"
+                >
+                  Confirm Flag
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Flag Note View Modal */}
+      {showFlagNoteModal && viewingFlagNote !== null && (
+        <div className="modal-overlay" onClick={closeFlagNoteModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Flag Note</h3>
+              <button className="modal-close" onClick={closeFlagNoteModal}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <div style={{
+                padding: '1rem',
+                backgroundColor: '#fee2e2',
+                border: '1px solid #dc2626',
+                borderRadius: '8px',
+                color: '#991b1b',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word'
+              }}>
+                {viewingFlagNote}
+              </div>
+              <div className="modal-actions">
+                <button 
+                  type="button" 
+                  onClick={closeFlagNoteModal} 
+                  className="btn btn-primary"
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Batch COTS Status Update Modal */}
+      {showBatchCotsStatusModal && (
+        <div className="modal-overlay" onClick={() => setShowBatchCotsStatusModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Update Status for {selectedCotsParts.length} Item{selectedCotsParts.length !== 1 ? 's' : ''}</h3>
+              <button className="modal-close" onClick={() => setShowBatchCotsStatusModal(false)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <div className="form-group">
+                <label>New Status *</label>
+                <select
+                  value={batchCotsStatus}
+                  onChange={(e) => setBatchCotsStatus(e.target.value)}
+                  style={{
+                    backgroundColor: COTS_STATUS_OPTIONS[batchCotsStatus]?.bgColor || '#ffffff',
+                    color: COTS_STATUS_OPTIONS[batchCotsStatus]?.color || '#1a1a1a',
+                    borderColor: COTS_STATUS_OPTIONS[batchCotsStatus]?.color || '#d1d5db'
+                  }}
+                >
+                  {Object.entries(COTS_STATUS_OPTIONS).map(([value, { label }]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="modal-actions">
+                <button 
+                  type="button" 
+                  onClick={() => setShowBatchCotsStatusModal(false)} 
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button 
+                  type="button" 
+                  onClick={handleBatchUpdateCotsStatus} 
+                  className="btn btn-primary"
+                >
+                  Update Status
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Quick Add Link Modal - Available in all views */}
+      {showQuickAddLinkModal && partToAddLink && (
+        <div className="modal-overlay" onClick={closeQuickAddLinkModal}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Add Link: {partToAddLink.name}</h3>
+              <button className="modal-close" onClick={closeQuickAddLinkModal}>
+                ×
+              </button>
+            </div>
+            <form onSubmit={handleQuickAddLink} className="modal-form">
+              <div className="form-group">
+                <label>{partToAddLink.isCots ? 'Link *' : 'Onshape Link *'}</label>
+                <input
+                  type="url"
+                  value={quickLinkValue}
+                  onChange={(e) => setQuickLinkValue(e.target.value)}
+                  placeholder={partToAddLink.isCots ? "https://..." : "https://cad.onshape.com/..."}
+                  required
+                  autoFocus
+                />
+                {partToAddLink.isCots && (
+                  <p style={{ fontSize: '0.875rem', color: '#6b7280', marginTop: '0.5rem', marginBottom: 0 }}>
+                    Enter any website link (vendor page, product page, etc.)
+                  </p>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button type="button" onClick={closeQuickAddLinkModal} className="btn btn-secondary">
+                  Cancel
+                </button>
+                <button type="submit" className="btn btn-primary">
+                  Add Link
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
