@@ -1604,11 +1604,16 @@
   border-radius: 8px;
   background-color: #ffffff;
   padding: 1rem;
+  position: relative;
 }
 
 .timeline-graph {
   display: block;
   min-width: 800px;
+}
+
+.timeline-graph-wrapper svg {
+  overflow: visible !important;
 }
 
 .graph-legend {

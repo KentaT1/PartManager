@@ -25,7 +25,6 @@ function Lifecycle() {
   const [selectedPartsForFailure, setSelectedPartsForFailure] = useState([]);
   const [partsSearchTerm, setPartsSearchTerm] = useState('');
   const [showPartsDropdown, setShowPartsDropdown] = useState(false);
-  const [selectedSystemForWpilog, setSelectedSystemForWpilog] = useState('');
   const [wpilogFile, setWpilogFile] = useState(null);
   const [wpilogTime, setWpilogTime] = useState('');
 
@@ -50,9 +49,10 @@ function Lifecycle() {
     description: '',
     due_after_matches: '',
     type: 'maintenance',
-    repeat: false,
+    repeat: true,
     repeat_every_matches: ''
   });
+  const [matchesAhead, setMatchesAhead] = useState(10); // Default to 10 matches ahead
   
   // Maintenance Details Modal state
   const [showMaintenanceDetails, setShowMaintenanceDetails] = useState(false);
@@ -61,6 +61,24 @@ function Lifecycle() {
   // Confirmation Modal state
   const [showConfirmModal, setShowConfirmModal] = useState(false);
   const [maintenanceToComplete, setMaintenanceToComplete] = useState(null);
+  
+  // Edit Maintenance Modal state
+  const [editingMaintenance, setEditingMaintenance] = useState(null);
+  const [editMaintenanceForm, setEditMaintenanceForm] = useState({
+    title: '',
+    description: ''
+  });
+  
+  // Edit Upcoming Maintenance Modal state
+  const [editingUpcomingMaintenance, setEditingUpcomingMaintenance] = useState(null);
+  const [editUpcomingMaintenanceForm, setEditUpcomingMaintenanceForm] = useState({
+    title: '',
+    description: '',
+    due_after_matches: '',
+    type: 'maintenance',
+    repeat: false,
+    repeat_every_matches: ''
+  });
 
   useEffect(() => {
     fetchSystems();
@@ -194,7 +212,8 @@ function Lifecycle() {
           *,
           systems!maintenance_reviews_system_id_fkey (
             id,
-            name
+            name,
+            usage_time
           )
         `)
         .eq('completed', false)
@@ -221,7 +240,7 @@ function Lifecycle() {
           (data || []).map(async (item) => {
             const { data: systemData } = await supabase
               .from('systems')
-              .select('id, name')
+              .select('id, name, usage_time')
               .eq('id', item.system_id)
               .single();
             return { ...item, systems: systemData };
@@ -233,6 +252,117 @@ function Lifecycle() {
         setMaintenanceItems([]);
       }
     }
+  };
+
+  // Calculate filtered maintenance items based on matches ahead
+  const getFilteredMaintenanceItems = () => {
+    if (!maintenanceItems || maintenanceItems.length === 0) return [];
+    
+    const runtimePerMatch = 2.5 / 60; // 2.5 minutes per match in hours
+    const filteredInstances = [];
+    
+    maintenanceItems.forEach((item) => {
+      const system = item.systems || systems.find(s => s.id === item.system_id);
+      if (!system) return;
+      
+      const currentRuntimeHours = system.usage_time || 0;
+      const currentRuntimeMinutes = currentRuntimeHours * 60;
+      const maxAheadMinutes = matchesAhead * 2.5;
+      const maxAheadRuntimeMinutes = currentRuntimeMinutes + maxAheadMinutes;
+      
+      // Extract target runtime and repeat info from description
+      const desc = item.description || '';
+      let initialTargetMinutes = currentRuntimeMinutes + 12.5; // Default to 5 matches ahead
+      const runtimeMatch = desc.match(/target runtime: ([\d.]+) hours/);
+      if (runtimeMatch) {
+        initialTargetMinutes = parseFloat(runtimeMatch[1]) * 60;
+      } else {
+        const matchesMatch = desc.match(/after ([\d.]+) match/);
+        if (matchesMatch) {
+          const matches = parseFloat(matchesMatch[1]);
+          initialTargetMinutes = currentRuntimeMinutes + (matches * 2.5);
+        }
+      }
+      
+      // Check if it repeats
+      const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+      const repeatEveryMatches = repeatMatch ? parseFloat(repeatMatch[1]) : null;
+      
+      if (repeatEveryMatches) {
+        // Show all instances within the matches ahead window, including overdue ones
+        const repeatIntervalMinutes = repeatEveryMatches * 2.5;
+        let instanceMinutes = initialTargetMinutes;
+        let instanceNumber = 0;
+        
+        // If the first instance is overdue, calculate the first overdue instance directly
+        if (initialTargetMinutes <= currentRuntimeMinutes) {
+          // Calculate how many intervals have passed since the initial target
+          const intervalsPassed = Math.floor((currentRuntimeMinutes - initialTargetMinutes) / repeatIntervalMinutes);
+          // The most recent overdue instance is at intervalsPassed (if it's still overdue) or intervalsPassed-1
+          let mostRecentOverdueNumber = intervalsPassed;
+          let mostRecentOverdueMinutes = initialTargetMinutes + (mostRecentOverdueNumber * repeatIntervalMinutes);
+          
+          // If this instance is not overdue (it's in the future), go back one
+          if (mostRecentOverdueMinutes > currentRuntimeMinutes) {
+            mostRecentOverdueNumber--;
+            mostRecentOverdueMinutes -= repeatIntervalMinutes;
+          }
+          
+          // Limit to showing at most 20 overdue instances back from the most recent one
+          // Start from the first overdue instance we want to show
+          const maxOverdueToShow = 20;
+          instanceNumber = Math.max(mostRecentOverdueNumber - (maxOverdueToShow - 1), 0);
+          instanceMinutes = initialTargetMinutes + (instanceNumber * repeatIntervalMinutes);
+        }
+        
+        // Now collect instances starting from here, including overdue and upcoming within window
+        while (true) {
+          const matchesRemaining = (instanceMinutes - currentRuntimeMinutes) / 2.5;
+          const isDue = instanceMinutes <= currentRuntimeMinutes;
+          
+          // Include if overdue OR within the matches ahead window
+          if (isDue || instanceMinutes <= maxAheadRuntimeMinutes) {
+            filteredInstances.push({
+              ...item,
+              instanceMinutes,
+              instanceNumber,
+              matchesRemaining,
+              isDue
+            });
+          }
+          
+          // Stop if we're past the window and not overdue
+          if (instanceMinutes > maxAheadRuntimeMinutes && !isDue) {
+            break;
+          }
+          
+          instanceMinutes += repeatIntervalMinutes;
+          instanceNumber++;
+          
+          // Safety limit to prevent too many iterations
+          if (instanceNumber > 100) {
+            break;
+          }
+        }
+      } else {
+        // Single instance - include if overdue OR within the matches ahead window
+        const matchesRemaining = (initialTargetMinutes - currentRuntimeMinutes) / 2.5;
+        const isDue = initialTargetMinutes <= currentRuntimeMinutes;
+        
+        if (isDue || initialTargetMinutes <= maxAheadRuntimeMinutes) {
+          filteredInstances.push({
+            ...item,
+            instanceMinutes: initialTargetMinutes,
+            instanceNumber: 0,
+            matchesRemaining,
+            isDue
+          });
+        }
+      }
+    });
+    
+    // Sort by instanceMinutes (when maintenance is due)
+    return filteredInstances.sort((a, b) => a.instanceMinutes - b.instanceMinutes);
   };
 
   const showAlert = (message) => {
@@ -254,12 +384,16 @@ function Lifecycle() {
     }
 
     try {
+      // Convert minutes to hours for database storage
+      const usageTimeMinutes = parseFloat(newSystem.usage_time) || 0;
+      const usageTimeHours = usageTimeMinutes / 60;
+      
       const { error } = await supabase
         .from('systems')
         .insert([{
           name: newSystem.name.trim(),
           description: newSystem.description.trim() || null,
-          usage_time: parseFloat(newSystem.usage_time) || 0
+          usage_time: usageTimeHours
         }]);
 
       if (error) {
@@ -287,9 +421,11 @@ function Lifecycle() {
 
   const handleUpdateUsageTime = async (systemId, newUsageTime) => {
     try {
+      // Convert minutes to hours for database storage
+      const usageTimeHours = (parseFloat(newUsageTime) || 0) / 60;
       const { error } = await supabase
         .from('systems')
-        .update({ usage_time: parseFloat(newUsageTime) || 0 })
+        .update({ usage_time: usageTimeHours })
         .eq('id', systemId);
 
       if (error) throw error;
@@ -375,44 +511,49 @@ function Lifecycle() {
   };
 
   const handleWpilogUpload = async () => {
-    if (!selectedSystemForWpilog || !wpilogTime) {
-      showAlert('Please select a system and enter time');
+    if (!wpilogTime) {
+      showAlert('Please enter time in minutes');
       return;
     }
 
     try {
-      const timeValue = parseFloat(wpilogTime);
-      if (isNaN(timeValue) || timeValue <= 0) {
-        showAlert('Please enter a valid time value');
+      const timeValueMinutes = parseFloat(wpilogTime);
+      if (isNaN(timeValueMinutes) || timeValueMinutes <= 0) {
+        showAlert('Please enter a valid time value in minutes');
         return;
       }
 
-      // Insert wpilog record
+      // Convert minutes to hours for database storage (usage_time is stored in hours)
+      const timeValueHours = timeValueMinutes / 60;
+
+      // Insert wpilog records for all systems
+      const wpilogRecords = systems.map(system => ({
+        system_id: system.id,
+        file_name: wpilogFile ? wpilogFile.name : 'Manual Entry',
+        time_added: timeValueHours
+      }));
+
       const { error: wpilogError } = await supabase
         .from('wpilog')
-        .insert([{
-          system_id: selectedSystemForWpilog,
-          file_name: wpilogFile ? wpilogFile.name : 'Manual Entry',
-          time_added: timeValue
-        }]);
+        .insert(wpilogRecords);
 
       if (wpilogError) throw wpilogError;
 
-      // Update system usage time
-      const system = systems.find(s => s.id === parseInt(selectedSystemForWpilog));
-      if (system) {
-        const newUsageTime = (system.usage_time || 0) + timeValue;
-        await supabase
+      // Update usage time for all systems
+      const updatePromises = systems.map(system => {
+        const newUsageTime = (system.usage_time || 0) + timeValueHours;
+        return supabase
           .from('systems')
           .update({ usage_time: newUsageTime })
           .eq('id', system.id);
-      }
+      });
 
-      setSelectedSystemForWpilog('');
+      await Promise.all(updatePromises);
+
       setWpilogFile(null);
       setWpilogTime('');
       fetchSystems();
-      showAlert('Wpilog uploaded and system usage time updated successfully');
+      showAlert(`Wpilog uploaded and ${systems.length} system(s) usage time updated successfully. Added ${timeValueMinutes} minutes to each system.`);
     } catch (error) {
       console.error('Error uploading wpilog:', error);
       showAlert('Error uploading wpilog: ' + error.message);
@@ -613,7 +754,7 @@ function Lifecycle() {
 
       if (error) throw error;
 
-      setNewMaintenance({ title: '', description: '', due_after_matches: '', type: 'maintenance', repeat: false, repeat_every_matches: '' });
+      setNewMaintenance({ title: '', description: '', due_after_matches: '', type: 'maintenance', repeat: true, repeat_every_matches: '' });
       fetchMaintenanceItems(); // Refresh the upcoming maintenance list
       if (selectedSystemDetails) {
         await fetchSystemFailures(selectedSystemDetails.id); // Refresh graph data
@@ -751,6 +892,195 @@ function Lifecycle() {
     setSelectedMaintenanceItem(item);
     setShowMaintenanceDetails(true);
   };
+  
+  // Open edit maintenance modal
+  const openEditMaintenance = (maintenance) => {
+    // Extract original description (without matches info)
+    const desc = maintenance.description || '';
+    const originalDesc = desc.split('\n\n')[0] || '';
+    
+    setEditingMaintenance(maintenance);
+    setEditMaintenanceForm({
+      title: maintenance.title || '',
+      description: originalDesc
+    });
+  };
+  
+  // Handle update maintenance (for completed maintenance)
+  const handleUpdateMaintenance = async () => {
+    if (!editingMaintenance) return;
+    
+    if (!editMaintenanceForm.title.trim()) {
+      showAlert('Please enter a maintenance title');
+      return;
+    }
+    
+    try {
+      // Preserve the matches info if it exists in the description
+      const originalDesc = editingMaintenance.description || '';
+      const matchesInfoMatch = originalDesc.match(/\n\n(.+)$/);
+      const matchesInfo = matchesInfoMatch ? matchesInfoMatch[1] : '';
+      
+      const fullDescription = editMaintenanceForm.description.trim()
+        ? (matchesInfo 
+            ? `${editMaintenanceForm.description.trim()}\n\n${matchesInfo}`
+            : editMaintenanceForm.description.trim())
+        : (matchesInfo || null);
+      
+      const { error } = await supabase
+        .from('maintenance_reviews')
+        .update({
+          title: editMaintenanceForm.title.trim(),
+          description: fullDescription
+        })
+        .eq('id', editingMaintenance.id);
+      
+      if (error) throw error;
+      
+      // Refresh data
+      if (selectedSystemDetails && selectedSystemDetails.id === editingMaintenance.system_id) {
+        await fetchSystemFailures(editingMaintenance.system_id);
+      }
+      fetchMaintenanceItems();
+      
+      setEditingMaintenance(null);
+      setEditMaintenanceForm({ title: '', description: '' });
+      showAlert('Maintenance updated successfully');
+    } catch (error) {
+      console.error('Error updating maintenance:', error);
+      showAlert('Error updating maintenance: ' + error.message);
+    }
+  };
+  
+  // Open edit upcoming maintenance modal
+  const openEditUpcomingMaintenance = (maintenance) => {
+    const desc = maintenance.description || '';
+    const originalDesc = desc.split('\n\n')[0] || '';
+    
+    // Extract matches info from description
+    let dueAfterMatches = '';
+    let repeat = false;
+    let repeatEveryMatches = '';
+    
+    const matchesMatch = desc.match(/after ([\d.]+) match/);
+    if (matchesMatch) {
+      dueAfterMatches = matchesMatch[1];
+    }
+    
+    const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+    if (repeatMatch) {
+      repeat = true;
+      repeatEveryMatches = repeatMatch[1];
+    }
+    
+    setEditingUpcomingMaintenance(maintenance);
+    setEditUpcomingMaintenanceForm({
+      title: maintenance.title || '',
+      description: originalDesc,
+      due_after_matches: dueAfterMatches,
+      type: maintenance.type || 'maintenance',
+      repeat: repeat,
+      repeat_every_matches: repeatEveryMatches
+    });
+  };
+  
+  // Handle update upcoming maintenance
+  const handleUpdateUpcomingMaintenance = async () => {
+    if (!editingUpcomingMaintenance) return;
+    
+    if (!editUpcomingMaintenanceForm.title.trim()) {
+      showAlert('Please enter a maintenance title');
+      return;
+    }
+    
+    if (!editUpcomingMaintenanceForm.due_after_matches || parseFloat(editUpcomingMaintenanceForm.due_after_matches) <= 0) {
+      showAlert('Please enter a valid number of matches');
+      return;
+    }
+    
+    try {
+      const system = selectedSystemDetails || systems.find(s => s.id === editingUpcomingMaintenance.system_id);
+      if (!system) {
+        showAlert('System not found');
+        return;
+      }
+      
+      // Calculate new target runtime
+      const matches = parseFloat(editUpcomingMaintenanceForm.due_after_matches);
+      const runtimePerMatch = 2.5 / 60; // 2.5 minutes in hours
+      const targetRuntime = (system.usage_time || 0) + (matches * runtimePerMatch);
+      
+      // Build description with matches info
+      let matchesInfo = `Scheduled after ${matches} match${matches !== 1 ? 'es' : ''} (target runtime: ${targetRuntime.toFixed(2)} hours)`;
+      
+      if (editUpcomingMaintenanceForm.repeat && editUpcomingMaintenanceForm.repeat_every_matches) {
+        const repeatMatches = parseFloat(editUpcomingMaintenanceForm.repeat_every_matches);
+        matchesInfo += ` | Repeats every ${repeatMatches} match${repeatMatches !== 1 ? 'es' : ''}`;
+      }
+      
+      const fullDescription = editUpcomingMaintenanceForm.description.trim() 
+        ? `${editUpcomingMaintenanceForm.description.trim()}\n\n${matchesInfo}`
+        : matchesInfo;
+      
+      const { error } = await supabase
+        .from('maintenance_reviews')
+        .update({
+          title: editUpcomingMaintenanceForm.title.trim(),
+          description: fullDescription,
+          type: editUpcomingMaintenanceForm.type
+        })
+        .eq('id', editingUpcomingMaintenance.id);
+      
+      if (error) throw error;
+      
+      // Refresh data
+      fetchMaintenanceItems();
+      if (selectedSystemDetails && selectedSystemDetails.id === editingUpcomingMaintenance.system_id) {
+        await fetchSystemFailures(editingUpcomingMaintenance.system_id);
+      }
+      
+      setEditingUpcomingMaintenance(null);
+      setEditUpcomingMaintenanceForm({
+        title: '',
+        description: '',
+        due_after_matches: '',
+        type: 'maintenance',
+        repeat: false,
+        repeat_every_matches: ''
+      });
+      showAlert('Maintenance updated successfully');
+    } catch (error) {
+      console.error('Error updating maintenance:', error);
+      showAlert('Error updating maintenance: ' + error.message);
+    }
+  };
+  
+  // Handle delete maintenance
+  const handleDeleteMaintenance = async (maintenanceId) => {
+    if (!window.confirm('Are you sure you want to delete this maintenance item? This action cannot be undone.')) {
+      return;
+    }
+    
+    try {
+      const { error } = await supabase
+        .from('maintenance_reviews')
+        .delete()
+        .eq('id', maintenanceId);
+      
+      if (error) throw error;
+      
+      // Refresh data
+      fetchMaintenanceItems();
+      if (selectedSystemDetails) {
+        await fetchSystemFailures(selectedSystemDetails.id);
+      }
+      
+      showAlert('Maintenance deleted successfully');
+    } catch (error) {
+      console.error('Error deleting maintenance:', error);
+      showAlert('Error deleting maintenance: ' + error.message);
+    }
+  };
 
   // Open confirmation modal for completing maintenance
   const openCompleteConfirmation = (item) => {
@@ -766,6 +1096,48 @@ function Lifecycle() {
     setShowConfirmModal(false);
 
     try {
+      // Check if this is a repeating maintenance
+      const desc = item.description || '';
+      const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+      const repeatEveryMatches = repeatMatch ? parseFloat(repeatMatch[1]) : null;
+      
+      // If it's repeating, create a new maintenance record for the next instance
+      if (repeatEveryMatches) {
+        // Get the system to calculate the new target runtime
+        const system = item.systems || systems.find(s => s.id === item.system_id);
+        if (system) {
+          const currentRuntime = system.usage_time || 0;
+          const runtimePerMatch = 2.5 / 60; // 2.5 minutes in hours
+          
+          // Calculate the next instance target runtime
+          // The next instance should be scheduled after the repeat interval from now
+          const nextTargetRuntime = currentRuntime + (repeatEveryMatches * runtimePerMatch);
+          
+          // Extract the original description (without the matches info)
+          const originalDesc = desc.split('\n\n')[0] || item.title;
+          
+          // Create new matches info for the next instance
+          const matchesInfo = `Scheduled after ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''} (target runtime: ${nextTargetRuntime.toFixed(2)} hours) | Repeats every ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''}`;
+          const fullDescription = originalDesc 
+            ? `${originalDesc}\n\n${matchesInfo}`
+            : matchesInfo;
+          
+          // Create the next instance
+          const { error: nextInstanceError } = await supabase
+            .from('maintenance_reviews')
+            .insert([{
+              system_id: item.system_id,
+              type: item.type,
+              title: item.title,
+              description: fullDescription,
+              due_date: null,
+              completed: false
+            }]);
+          
+          if (nextInstanceError) throw nextInstanceError;
+        }
+      }
+      
       // Update maintenance item as completed
       const { error: updateError } = await supabase
         .from('maintenance_reviews')
@@ -795,7 +1167,10 @@ function Lifecycle() {
       }
 
       setMaintenanceToComplete(null);
-      showAlert('Maintenance marked as completed and added to incidents graph');
+      const repeatMsg = repeatEveryMatches 
+        ? ` Next instance scheduled for ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''} from now.`
+        : '';
+      showAlert('Maintenance marked as completed and added to incidents graph.' + repeatMsg);
     } catch (error) {
       console.error('Error completing maintenance:', error);
       setMaintenanceToComplete(null);
@@ -845,50 +1220,94 @@ function Lifecycle() {
           {/* Maintenance Items Box (Left Side - Large) */}
           <div className="dashboard-left-large">
             <div className="dashboard-box maintenance-box">
-              <h3>Upcoming Maintenance/Predicted Failures</h3>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <h3 style={{ margin: 0 }}>Upcoming Maintenance/Predicted Failures</h3>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                  <label style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>Matches ahead:</label>
+                  <input
+                    type="number"
+                    value={matchesAhead}
+                    onChange={(e) => setMatchesAhead(Math.max(1, parseInt(e.target.value) || 10))}
+                    min="1"
+                    step="1"
+                    style={{ width: '60px', padding: '0.25rem 0.5rem', fontSize: '0.875rem' }}
+                  />
+                </div>
+              </div>
               <div className="maintenance-list">
-                {maintenanceItems.length === 0 ? (
-                  <div className="empty-state" style={{ padding: '2rem' }}>
-                    <p>No upcoming maintenance or review items</p>
-                  </div>
-                ) : (
-                  <div className="maintenance-order-book">
-                    {maintenanceItems.map((item) => (
-                      <div key={item.id} className="maintenance-item">
-                        <div className="maintenance-item-header">
-                          <span className="maintenance-type">{item.type}</span>
-                          <span className="maintenance-system">
-                            {item.systems?.name || systems.find(s => s.id === item.system_id)?.name || 'Unknown System'}
-                          </span>
-                        </div>
-                        <div className="maintenance-item-title">{item.title}</div>
-                        {item.description && (
-                          <div className="maintenance-item-description">{item.description}</div>
-                        )}
-                        {item.due_date && (
-                          <div className="maintenance-item-due">
-                            Due: {new Date(item.due_date).toLocaleDateString()}
+                {(() => {
+                  const filteredItems = getFilteredMaintenanceItems();
+                  return filteredItems.length === 0 ? (
+                    <div className="empty-state" style={{ padding: '2rem' }}>
+                      <p>No upcoming maintenance or review items within the next {matchesAhead} matches</p>
+                    </div>
+                  ) : (
+                    <div className="maintenance-order-book">
+                      {filteredItems.map((item, index) => {
+                        const isDue = item.isDue;
+                        const matchesRemaining = isDue ? Math.abs(item.matchesRemaining) : Math.max(0, item.matchesRemaining);
+                        return (
+                          <div key={`${item.id}-${item.instanceNumber}-${index}`} className="maintenance-item" style={isDue ? { borderLeft: '4px solid #dc2626' } : {}}>
+                            {isDue && (
+                              <div style={{
+                                background: '#dc2626',
+                                color: '#ffffff',
+                                padding: '0.25rem 0.75rem',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                textTransform: 'uppercase',
+                                display: 'inline-block',
+                                marginBottom: '0.5rem'
+                              }}>
+                                ⚠️ OVERDUE
+                              </div>
+                            )}
+                            <div className="maintenance-item-header">
+                              <span className="maintenance-type">{item.type}</span>
+                              <span className="maintenance-system">
+                                {item.systems?.name || systems.find(s => s.id === item.system_id)?.name || 'Unknown System'}
+                              </span>
+                            </div>
+                            <div className="maintenance-item-title">{item.title}</div>
+                            {item.description && (
+                              <div className="maintenance-item-description">
+                                {item.description.split('\n\n')[0]}
+                                {item.instanceNumber > 0 && (
+                                  <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#6b7280' }}>
+                                    Instance #{item.instanceNumber + 1}
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                            <div className="maintenance-item-due" style={{ color: isDue ? '#dc2626' : '#f59e0b', marginTop: '0.5rem' }}>
+                              {isDue ? (
+                                <span>⚠️ Due now ({matchesRemaining.toFixed(1)} matches overdue)</span>
+                              ) : (
+                                <span>⏱️ {matchesRemaining.toFixed(1)} matches remaining ({(matchesRemaining * 2.5).toFixed(1)} minutes)</span>
+                              )}
+                            </div>
+                            <div className="maintenance-item-actions">
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => openMaintenanceDetails(item)}
+                                style={{ marginRight: '0.5rem' }}
+                              >
+                                View Details
+                              </button>
+                              <button
+                                className="btn btn-primary btn-sm"
+                                onClick={() => openCompleteConfirmation(item)}
+                              >
+                                Completed
+                              </button>
+                            </div>
                           </div>
-                        )}
-                        <div className="maintenance-item-actions">
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            onClick={() => openMaintenanceDetails(item)}
-                            style={{ marginRight: '0.5rem' }}
-                          >
-                            View Details
-                          </button>
-                          <button
-                            className="btn btn-primary btn-sm"
-                            onClick={() => openCompleteConfirmation(item)}
-                          >
-                            Completed
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
               </div>
             </div>
           </div>
@@ -899,29 +1318,19 @@ function Lifecycle() {
             <div className="dashboard-box">
               <h3>Upload Wpilog</h3>
               <div className="form-group">
-                <label>Select System</label>
-                <select
-                  value={selectedSystemForWpilog}
-                  onChange={(e) => setSelectedSystemForWpilog(e.target.value)}
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
-                >
-                  <option value="">-- Select System --</option>
-                  {systems.map(system => (
-                    <option key={system.id} value={system.id}>{system.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Time (hours)</label>
+                <label>Runtime (minutes)</label>
                 <input
                   type="number"
                   value={wpilogTime}
                   onChange={(e) => setWpilogTime(e.target.value)}
                   step="0.1"
                   min="0"
-                  placeholder="Enter time in hours"
+                  placeholder="Enter runtime in minutes"
                   style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
                 />
+                <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                  This will add the runtime to all systems
+                </small>
               </div>
               <div className="form-group">
                 <label>Wpilog File (optional)</label>
@@ -1100,10 +1509,10 @@ function Lifecycle() {
                     <p className="system-description">{system.description}</p>
                   )}
                   <div className="system-usage">
-                    <label>Usage Time (hours):</label>
+                    <label>Usage Time (minutes):</label>
                     <input
                       type="number"
-                      value={system.usage_time || 0}
+                      value={((system.usage_time || 0) * 60).toFixed(1)}
                       onChange={(e) => handleUpdateUsageTime(system.id, e.target.value)}
                       step="0.1"
                       min="0"
@@ -1184,11 +1593,11 @@ function Lifecycle() {
                 />
               </div>
               <div className="form-group">
-                <label>Initial Usage Time (hours)</label>
+                <label>Initial Usage Time (minutes)</label>
                 <input
                   type="number"
-                  value={newSystem.usage_time}
-                  onChange={(e) => setNewSystem({ ...newSystem, usage_time: e.target.value })}
+                  value={((newSystem.usage_time || 0) * 60).toFixed(1)}
+                  onChange={(e) => setNewSystem({ ...newSystem, usage_time: (parseFloat(e.target.value) || 0) / 60 })}
                   step="0.1"
                   min="0"
                 />
@@ -1407,6 +1816,173 @@ function Lifecycle() {
         </div>
       )}
 
+      {/* Edit Maintenance Modal (for completed maintenance) */}
+      {editingMaintenance && (
+        <div className="modal-overlay" onClick={() => setEditingMaintenance(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+            <div className="modal-header">
+              <h3>Edit Maintenance</h3>
+              <button className="modal-close" onClick={() => setEditingMaintenance(null)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <div className="form-group">
+                <label>Title *</label>
+                <input
+                  type="text"
+                  value={editMaintenanceForm.title}
+                  onChange={(e) => setEditMaintenanceForm({ ...editMaintenanceForm, title: e.target.value })}
+                  required
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Description</label>
+                <textarea
+                  value={editMaintenanceForm.description}
+                  onChange={(e) => setEditMaintenanceForm({ ...editMaintenanceForm, description: e.target.value })}
+                  rows={4}
+                  placeholder="Maintenance description..."
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem', resize: 'vertical' }}
+                />
+              </div>
+              <div className="modal-actions">
+                <button 
+                  onClick={() => {
+                    setEditingMaintenance(null);
+                    setEditMaintenanceForm({ title: '', description: '' });
+                  }} 
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button onClick={handleUpdateMaintenance} className="btn btn-primary">
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Upcoming Maintenance Modal */}
+      {editingUpcomingMaintenance && (
+        <div className="modal-overlay" onClick={() => setEditingUpcomingMaintenance(null)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
+            <div className="modal-header">
+              <h3>Edit Maintenance</h3>
+              <button className="modal-close" onClick={() => setEditingUpcomingMaintenance(null)}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <div className="form-group">
+                <label>Maintenance Type</label>
+                <select
+                  value={editUpcomingMaintenanceForm.type}
+                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, type: e.target.value })}
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
+                >
+                  <option value="maintenance">Maintenance</option>
+                  <option value="review">Review</option>
+                </select>
+              </div>
+              <div className="form-group">
+                <label>Title *</label>
+                <input
+                  type="text"
+                  value={editUpcomingMaintenanceForm.title}
+                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, title: e.target.value })}
+                  required
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Description</label>
+                <textarea
+                  value={editUpcomingMaintenanceForm.description}
+                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, description: e.target.value })}
+                  rows={3}
+                  placeholder="Additional details..."
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem', resize: 'vertical' }}
+                />
+              </div>
+              <div className="form-group">
+                <label>Due After (Matches) *</label>
+                <input
+                  type="number"
+                  value={editUpcomingMaintenanceForm.due_after_matches}
+                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, due_after_matches: e.target.value })}
+                  placeholder="e.g., 10"
+                  min="1"
+                  step="1"
+                  required
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '0.5rem' }}
+                />
+                <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginBottom: '1rem' }}>
+                  1 FRC match = 2:30 (2.5 minutes) of runtime
+                  {editUpcomingMaintenanceForm.due_after_matches && parseFloat(editUpcomingMaintenanceForm.due_after_matches) > 0 && (
+                    <span style={{ display: 'block', marginTop: '0.25rem' }}>
+                      = {(parseFloat(editUpcomingMaintenanceForm.due_after_matches) * 2.5 / 60).toFixed(2)} hours of additional runtime
+                    </span>
+                  )}
+                </small>
+              </div>
+              <div className="form-group">
+                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={editUpcomingMaintenanceForm.repeat}
+                    onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, repeat: e.target.checked, repeat_every_matches: e.target.checked ? editUpcomingMaintenanceForm.repeat_every_matches : '' })}
+                    style={{ width: 'auto', margin: 0 }}
+                  />
+                  <span>Repeat this maintenance</span>
+                </label>
+                {editUpcomingMaintenanceForm.repeat && (
+                  <div style={{ marginTop: '0.5rem', marginLeft: '1.5rem' }}>
+                    <label style={{ fontSize: '0.875rem', display: 'block', marginBottom: '0.25rem' }}>Repeat every (matches):</label>
+                    <input
+                      type="number"
+                      value={editUpcomingMaintenanceForm.repeat_every_matches}
+                      onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, repeat_every_matches: e.target.value })}
+                      placeholder="e.g., 20"
+                      min="1"
+                      step="1"
+                      style={{ width: '100%', padding: '0.5rem', marginBottom: '0.5rem' }}
+                    />
+                    <small style={{ color: '#6b7280', fontSize: '0.875rem' }}>
+                      Maintenance will be scheduled again every {editUpcomingMaintenanceForm.repeat_every_matches || 'X'} match{parseFloat(editUpcomingMaintenanceForm.repeat_every_matches) !== 1 ? 'es' : ''} after completion
+                    </small>
+                  </div>
+                )}
+              </div>
+              <div className="modal-actions">
+                <button 
+                  onClick={() => {
+                    setEditingUpcomingMaintenance(null);
+                    setEditUpcomingMaintenanceForm({
+                      title: '',
+                      description: '',
+                      due_after_matches: '',
+                      type: 'maintenance',
+                      repeat: false,
+                      repeat_every_matches: ''
+                    });
+                  }} 
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button onClick={handleUpdateUpcomingMaintenance} className="btn btn-primary">
+                  Save Changes
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* System Details Modal */}
       {showSystemDetails && selectedSystemDetails && (
         <div className="modal-overlay" onClick={() => setShowSystemDetails(false)}>
@@ -1493,6 +2069,186 @@ function Lifecycle() {
                         )}
                       </div>
                     ))
+                  )}
+                </div>
+              </div>
+
+              {/* Completed Maintenance Section */}
+              <div className="system-details-section">
+                <h4>Completed Maintenance</h4>
+                <div className="reports-list">
+                  {systemCompletedMaintenance.length === 0 ? (
+                    <div className="empty-state-small">No completed maintenance recorded</div>
+                  ) : (
+                    systemCompletedMaintenance.map(maintenance => (
+                      <div key={maintenance.id} className="report-item">
+                        <div 
+                          className="report-item-header"
+                          onClick={() => setExpandedReportId(expandedReportId === maintenance.id ? null : maintenance.id)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <div>
+                            <strong>{maintenance.title}</strong>
+                            <span className="report-components-count" style={{ marginLeft: '0.5rem', color: '#2563eb' }}>
+                              {maintenance.completed_at 
+                                ? new Date(maintenance.completed_at).toLocaleDateString()
+                                : 'Completed'}
+                            </span>
+                          </div>
+                          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                openEditMaintenance(maintenance);
+                              }}
+                              style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                            >
+                              Edit
+                            </button>
+                            <span className="report-toggle">
+                              {expandedReportId === maintenance.id ? '▼' : '▶'}
+                            </span>
+                          </div>
+                        </div>
+                        {expandedReportId === maintenance.id && (
+                          <div className="report-item-details">
+                            <div className="report-detail-section">
+                              <strong>Type:</strong>
+                              <span style={{ 
+                                display: 'inline-block', 
+                                background: '#2563eb', 
+                                color: '#ffffff', 
+                                padding: '0.25rem 0.75rem', 
+                                borderRadius: '4px',
+                                fontSize: '0.875rem',
+                                fontWeight: '600',
+                                textTransform: 'uppercase',
+                                marginLeft: '0.5rem'
+                              }}>
+                                {maintenance.type}
+                              </span>
+                            </div>
+                            {maintenance.description && (
+                              <div className="report-detail-section">
+                                <strong>Description:</strong>
+                                <p className="report-comment" style={{ whiteSpace: 'pre-wrap' }}>
+                                  {maintenance.description.split('\n\n')[0]}
+                                </p>
+                              </div>
+                            )}
+                            {maintenance.completed_at && (
+                              <div className="report-detail-section">
+                                <strong>Completed At:</strong>
+                                <p>{new Date(maintenance.completed_at).toLocaleString()}</p>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Edit Current Maintenance Section */}
+              <div className="system-details-section">
+                <h4>Edit Current Maintenance</h4>
+                <div className="reports-list">
+                  {systemUpcomingMaintenance.length === 0 ? (
+                    <div className="empty-state-small">No upcoming maintenance scheduled</div>
+                  ) : (
+                    systemUpcomingMaintenance.map(maintenance => {
+                      // Extract matches info from description
+                      const desc = maintenance.description || '';
+                      const matchesMatch = desc.match(/after ([\d.]+) match/);
+                      const matches = matchesMatch ? parseFloat(matchesMatch[1]) : null;
+                      const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+                      const isRepeating = !!repeatMatch;
+                      
+                      return (
+                        <div key={maintenance.id} className="report-item">
+                          <div 
+                            className="report-item-header"
+                            onClick={() => setExpandedReportId(expandedReportId === maintenance.id ? null : maintenance.id)}
+                            style={{ cursor: 'pointer' }}
+                          >
+                            <div>
+                              <strong>{maintenance.title}</strong>
+                              <span className="report-components-count" style={{ marginLeft: '0.5rem', color: '#f59e0b' }}>
+                                {matches ? `Due after ${matches} match${matches !== 1 ? 'es' : ''}` : 'Scheduled'}
+                                {isRepeating && ' (Repeating)'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openEditUpcomingMaintenance(maintenance);
+                                }}
+                                style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteMaintenance(maintenance.id);
+                                }}
+                                style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: '#dc2626', color: '#ffffff' }}
+                              >
+                                Delete
+                              </button>
+                              <span className="report-toggle">
+                                {expandedReportId === maintenance.id ? '▼' : '▶'}
+                              </span>
+                            </div>
+                          </div>
+                          {expandedReportId === maintenance.id && (
+                            <div className="report-item-details">
+                              <div className="report-detail-section">
+                                <strong>Type:</strong>
+                                <span style={{ 
+                                  display: 'inline-block', 
+                                  background: '#2563eb', 
+                                  color: '#ffffff', 
+                                  padding: '0.25rem 0.75rem', 
+                                  borderRadius: '4px',
+                                  fontSize: '0.875rem',
+                                  fontWeight: '600',
+                                  textTransform: 'uppercase',
+                                  marginLeft: '0.5rem'
+                                }}>
+                                  {maintenance.type}
+                                </span>
+                              </div>
+                              {maintenance.description && (
+                                <div className="report-detail-section">
+                                  <strong>Description:</strong>
+                                  <p className="report-comment" style={{ whiteSpace: 'pre-wrap' }}>
+                                    {maintenance.description.split('\n\n')[0]}
+                                  </p>
+                                </div>
+                              )}
+                              {matches && (
+                                <div className="report-detail-section">
+                                  <strong>Scheduled:</strong>
+                                  <p>Due after {matches} match{matches !== 1 ? 'es' : ''} ({(matches * 2.5 / 60).toFixed(2)} hours of additional runtime)</p>
+                                </div>
+                              )}
+                              {isRepeating && (
+                                <div className="report-detail-section">
+                                  <strong>Repeat Schedule:</strong>
+                                  <p>Repeats every {repeatMatch[1]} match{parseFloat(repeatMatch[1]) !== 1 ? 'es' : ''}</p>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               </div>
@@ -1617,10 +2373,43 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
   );
   const minMinutes = 0;
 
-  // Y-axis: spread events vertically (different y positions for visual separation)
-  const yPositions = data.map((_, index) => {
-    // Distribute points vertically with some spacing
-    return padding.top + (index % 5) * (plotHeight / 5) + 20;
+  // Group events by time (round to nearest 0.1 minutes for grouping)
+  // Count how many events occur at each time point
+  const timeBucketSize = 0.1; // Group events within 0.1 minutes
+  const eventsByTime = {};
+  
+  data.forEach((event) => {
+    const bucketKey = Math.round(event.minutes / timeBucketSize) * timeBucketSize;
+    if (!eventsByTime[bucketKey]) {
+      eventsByTime[bucketKey] = [];
+    }
+    eventsByTime[bucketKey].push(event);
+  });
+  
+  // Find the maximum number of simultaneous events
+  const maxSimultaneousEvents = Math.max(
+    ...Object.values(eventsByTime).map(events => events.length),
+    1
+  );
+  
+  // Y-axis: number of events at each time point (not cumulative)
+  // Always display up to 5 events on the y-axis
+  const yAxisMax = 5;
+  const yScale = (eventCount) => {
+    // Invert y-axis: higher event count at top (SVG y=0 is at top)
+    // Cap eventCount at yAxisMax for scaling purposes
+    const normalized = Math.min(eventCount, yAxisMax) / yAxisMax;
+    return graphHeight - padding.bottom - (normalized * plotHeight);
+  };
+
+  // Assign event count (number of events at this time) to each event
+  const eventDataWithCount = data.map((event) => {
+    const bucketKey = Math.round(event.minutes / timeBucketSize) * timeBucketSize;
+    const eventsAtThisTime = eventsByTime[bucketKey].length;
+    return {
+      ...event,
+      eventCount: eventsAtThisTime // Number of events at this time point
+    };
   });
 
   // X-axis scale: minutes to pixels
@@ -1633,8 +2422,8 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
   return (
     <div className="timeline-graph-container">
       <div className="timeline-graph-wrapper">
-        <svg width={graphWidth} height={graphHeight} className="timeline-graph">
-          {/* Grid lines - show every 5 minutes or appropriate intervals */}
+        <svg width={graphWidth} height={graphHeight} className="timeline-graph" style={{ overflow: 'visible' }}>
+          {/* Vertical grid lines - show every 5 minutes or appropriate intervals */}
           {(() => {
             const numGridLines = Math.ceil(maxMinutes / 5);
             const gridLines = [];
@@ -1642,7 +2431,7 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
               const minutes = (maxMinutes / numGridLines) * i;
               const x = xScale(minutes);
               gridLines.push(
-                <g key={i}>
+                <g key={`v-${i}`}>
                   <line
                     x1={x}
                     y1={padding.top}
@@ -1666,6 +2455,59 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
             }
             return gridLines;
           })()}
+
+          {/* Horizontal grid lines - show event count intervals */}
+          {(() => {
+            const gridLines = [];
+            // Show grid lines for 1 through 5 events
+            for (let i = 1; i <= yAxisMax; i++) {
+              const eventCount = i;
+              const y = yScale(eventCount);
+              gridLines.push(
+                <g key={`h-${i}`}>
+                  <line
+                    x1={padding.left}
+                    y1={y}
+                    x2={graphWidth - padding.right}
+                    y2={y}
+                    stroke="#e5e7eb"
+                    strokeWidth="1"
+                    strokeDasharray="2,2"
+                  />
+                  <text
+                    x={padding.left - 10}
+                    y={y + 4}
+                    textAnchor="end"
+                    fontSize="10"
+                    fill="#6b7280"
+                  >
+                    {eventCount}
+                  </text>
+                </g>
+              );
+            }
+            return gridLines;
+          })()}
+
+          {/* Y-axis line */}
+          <line
+            x1={padding.left}
+            y1={padding.top}
+            x2={padding.left}
+            y2={graphHeight - padding.bottom}
+            stroke="#374151"
+            strokeWidth="2"
+          />
+
+          {/* X-axis line */}
+          <line
+            x1={padding.left}
+            y1={graphHeight - padding.bottom}
+            x2={graphWidth - padding.right}
+            y2={graphHeight - padding.bottom}
+            stroke="#374151"
+            strokeWidth="2"
+          />
 
           {/* Current runtime indicator (dotted vertical line) */}
           {currentRuntimeMinutes > 0 && (
@@ -1693,10 +2535,55 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
           )}
 
           {/* Event dots */}
-          {data.map((event, index) => {
+          {eventDataWithCount.map((event, index) => {
             const x = xScale(event.minutes);
-            const y = yPositions[index];
+            const y = yScale(event.eventCount);
             const isHovered = hoveredPoint === index;
+
+            // Calculate tooltip dimensions
+            const tooltipWidth = 180;
+            const tooltipHeight = event.isDue ? 65 : 50;
+            const tooltipPadding = 12;
+            const safeZone = 30; // Larger safe zone from edges to avoid clipping
+
+            // Calculate tooltip position to avoid clipping
+            // Start with centered on dot
+            let tooltipX = x - (tooltipWidth / 2);
+            let tooltipY = y - tooltipHeight - tooltipPadding;
+            
+            // Calculate strict visible bounds with safe zones
+            const minX = padding.left + safeZone;
+            const maxX = graphWidth - padding.right - tooltipWidth - safeZone;
+            const minY = padding.top + safeZone;
+            const maxY = graphHeight - padding.bottom - tooltipHeight - safeZone;
+            
+            // Clamp tooltip X to stay within bounds
+            tooltipX = Math.max(minX, Math.min(maxX, tooltipX));
+            
+            // Handle vertical positioning - prefer above, fallback to below
+            const spaceAbove = y - padding.top;
+            const spaceBelow = graphHeight - padding.bottom - y;
+            
+            if (spaceAbove >= tooltipHeight + tooltipPadding + safeZone) {
+              // Enough space above - position above
+              tooltipY = y - tooltipHeight - tooltipPadding;
+            } else if (spaceBelow >= tooltipHeight + tooltipPadding + safeZone) {
+              // Not enough space above, but enough below - position below
+              tooltipY = y + tooltipPadding + 10;
+            } else {
+              // Not enough space in either direction - position in available space
+              if (spaceAbove > spaceBelow) {
+                tooltipY = Math.max(minY, padding.top + safeZone);
+              } else {
+                tooltipY = Math.min(maxY, graphHeight - padding.bottom - tooltipHeight - safeZone);
+              }
+            }
+            
+            // Final clamp to ensure tooltip stays within bounds
+            tooltipY = Math.max(minY, Math.min(maxY, tooltipY));
+            
+            // Calculate text x position (centered in tooltip rect)
+            const textX = tooltipX + (tooltipWidth / 2);
 
             return (
               <g key={index}>
@@ -1738,16 +2625,16 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
                 {isHovered && (
                   <g>
                     <rect
-                      x={x - 100}
-                      y={y - 60}
-                      width="200"
-                      height={event.isDue ? 65 : 50}
+                      x={tooltipX}
+                      y={tooltipY}
+                      width={tooltipWidth}
+                      height={tooltipHeight}
                       fill="rgba(0, 0, 0, 0.8)"
                       rx="4"
                     />
                     <text
-                      x={x}
-                      y={y - 40}
+                      x={textX}
+                      y={tooltipY + 20}
                       textAnchor="middle"
                       fontSize="11"
                       fill="#ffffff"
@@ -1757,8 +2644,8 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
                     </text>
                     {event.isDue && (
                       <text
-                        x={x}
-                        y={y - 25}
+                        x={textX}
+                        y={tooltipY + 35}
                         textAnchor="middle"
                         fontSize="10"
                         fill="#fca5a5"
@@ -1768,8 +2655,8 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
                       </text>
                     )}
                     <text
-                      x={x}
-                      y={event.isDue ? y - 10 : y - 25}
+                      x={textX}
+                      y={tooltipY + (event.isDue ? 50 : 40)}
                       textAnchor="middle"
                       fontSize="10"
                       fill="#e5e7eb"
@@ -1793,7 +2680,7 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
             transform={`rotate(-90, 15, ${graphHeight / 2})`}
             textAnchor="middle"
           >
-            Events
+            Number of Events
           </text>
 
           {/* X-axis label */}
