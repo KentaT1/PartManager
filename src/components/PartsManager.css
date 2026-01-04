@@ -1,6 +1,6 @@
 .parts-manager {
   background-color: transparent;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin-top: 1.5rem;
 }
 
@@ -33,13 +33,13 @@
 }
 
 .main-view-tab:hover {
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   background-color: #f9fafb;
 }
 
 .main-view-tab.active {
-  color: #2563eb;
-  border-bottom-color: #2563eb;
+  color: rgb(35,35,35);
+  border-bottom-color: rgb(35,35,35);
   background-color: #f9fafb;
 }
 
@@ -85,7 +85,7 @@
 
 .parts-manager-header h2 {
   font-size: 2rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -135,13 +135,13 @@
 }
 
 .tab:hover {
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   background-color: #f9fafb;
 }
 
 .tab.active {
-  color: #2563eb;
-  border-bottom-color: #2563eb;
+  color: rgb(35,35,35);
+  border-bottom-color: rgb(35,35,35);
   background-color: #f9fafb;
 }
 
@@ -190,9 +190,9 @@
 }
 
 .tab-add:hover {
-  color: #2563eb;
+  color: rgb(35,35,35);
   background-color: #f9fafb;
-  border-bottom-color: #2563eb;
+  border-bottom-color: rgb(35,35,35);
 }
 
 /* Parts Content */
@@ -219,7 +219,7 @@
 
 .parts-header h3 {
   font-size: 1.75rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -236,7 +236,7 @@
   border: 1px solid #d1d5db;
   border-radius: 8px;
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.95rem;
   font-family: 'Inter', sans-serif;
   transition: all 0.3s ease;
@@ -244,7 +244,7 @@
 
 .parts-search-input:focus {
   outline: none;
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
@@ -257,7 +257,7 @@
   padding: 0.875rem 1.75rem;
   border: 1px solid #e5e7eb;
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.95rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -277,9 +277,9 @@
 }
 
 .btn-primary {
-  background-color: #2563eb;
+  background-color: rgb(35,35,35);
   color: #ffffff;
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
 }
 
 .btn-primary:hover {
@@ -291,7 +291,7 @@
 
 .btn-secondary {
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   border-color: #e5e7eb;
 }
 
@@ -353,7 +353,7 @@
   padding: 0.875rem;
   background-color: #ffffff;
   border: 1px solid #d1d5db;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 1rem;
   font-family: 'Inter', sans-serif;
   border-radius: 8px;
@@ -363,7 +363,7 @@
 .form-group input:focus,
 .form-group select:focus {
   outline: none;
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
   background-color: #ffffff;
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
@@ -413,13 +413,13 @@
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: #2563eb;
+  accent-color: rgb(35,35,35);
 }
 
 .parts-table td {
   padding: 1.25rem 1rem;
   border-bottom: 1px solid #f3f4f6;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .parts-table tbody tr {
@@ -443,7 +443,7 @@
 }
 
 .link {
-  color: #2563eb;
+  color: rgb(35,35,35);
   text-decoration: none;
   transition: color 0.2s;
   font-weight: 500;
@@ -461,7 +461,7 @@
 
 .btn-quick-add-link {
   padding: 0.5rem 1rem;
-  background-color: #2563eb;
+  background-color: rgb(35,35,35);
   color: #ffffff;
   border: none;
   border-radius: 6px;
@@ -506,7 +506,7 @@
 
 .status-select option {
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   padding: 0.5rem;
 }
 
@@ -591,7 +591,7 @@
   margin: 0;
   font-size: 1.5rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   letter-spacing: 0.05em;
   font-family: 'Oswald', sans-serif;
   text-transform: uppercase;
@@ -616,7 +616,7 @@
 
 .modal-close:hover {
   background-color: #f3f4f6;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .modal-form {
@@ -638,7 +638,7 @@
 
 .delete-warning {
   font-size: 1.1rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0 0 1rem 0;
   line-height: 1.6;
 }
@@ -660,13 +660,13 @@
 
 .alert-message {
   font-size: 1rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0 0 1.5rem 0;
   line-height: 1.6;
   padding: 1rem;
   background-color: #f9fafb;
   border-radius: 8px;
-  border-left: 3px solid #2563eb;
+  border-left: 3px solid rgb(35,35,35);
 }
 
 /* Batch Actions Toolbar */
@@ -690,7 +690,7 @@
 }
 
 .batch-actions-info strong {
-  color: #2563eb;
+  color: rgb(35,35,35);
   font-size: 1.1rem;
 }
 
@@ -831,7 +831,7 @@
 
 .manufacturing-header h2 {
   font-size: 2rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -855,7 +855,7 @@
 .stat-value {
   font-size: 2.5rem;
   font-weight: 700;
-  color: #2563eb;
+  color: rgb(35,35,35);
   line-height: 1;
   margin-bottom: 0.5rem;
 }
@@ -887,7 +887,7 @@
 
 .manufacturing-orders h3 {
   font-size: 1.5rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0 0 2rem 0;
   font-weight: 600;
   letter-spacing: 0.05em;
@@ -928,14 +928,14 @@
 .order-card-header h4 {
   font-size: 1.25rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0;
   flex: 1;
 }
 
 .order-subsystem {
   background-color: #eff6ff;
-  color: #2563eb;
+  color: rgb(35,35,35);
   padding: 0.375rem 0.75rem;
   border-radius: 6px;
   font-size: 0.75rem;
@@ -953,7 +953,7 @@
 
 .order-link {
   display: inline-block;
-  color: #2563eb;
+  color: rgb(35,35,35);
   text-decoration: none;
   font-weight: 500;
   margin-bottom: 0.75rem;
@@ -978,7 +978,7 @@
 }
 
 .order-meta-value {
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .order-card-actions {
@@ -1015,7 +1015,7 @@
   text-align: left;
   cursor: pointer;
   font-size: 0.9rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   transition: background-color 0.2s ease;
   font-family: 'Inter', sans-serif;
 }
@@ -1054,7 +1054,7 @@
   margin: 0;
   font-size: 2rem;
   font-weight: 700;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .systems-grid {
@@ -1087,7 +1087,7 @@
   margin: 0;
   font-size: 1.25rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .system-description {
@@ -1104,7 +1104,7 @@
 .system-usage label {
   display: block;
   font-weight: 500;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin-bottom: 0.5rem;
   font-size: 0.9rem;
 }
@@ -1131,7 +1131,7 @@
   margin: 0 0 1rem 0;
   font-size: 2rem;
   font-weight: 700;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 /* Buy List Dashboard */
@@ -1152,7 +1152,7 @@
 
 .buy-list-header h2 {
   font-size: 2rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin: 0;
   font-weight: 700;
   letter-spacing: 0.05em;
@@ -1186,7 +1186,7 @@
 
 .filter-group label {
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.9rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1198,7 +1198,7 @@
   border: 1px solid #d1d5db;
   border-radius: 8px;
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.9rem;
   font-family: 'Inter', sans-serif;
   cursor: pointer;
@@ -1207,12 +1207,12 @@
 }
 
 .vendor-filter-select:hover {
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
 }
 
 .vendor-filter-select:focus {
   outline: none;
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
@@ -1242,7 +1242,7 @@
   padding: 1rem 1.5rem;
   text-align: left;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.875rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1252,7 +1252,7 @@
 .buy-list-table td {
   padding: 1rem 1.5rem;
   border-bottom: 1px solid #f3f4f6;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.9rem;
 }
 
@@ -1270,6 +1270,84 @@
 
 .buy-list-table tbody tr:last-child td {
   border-bottom: none;
+}
+
+/* Inventory Dashboard */
+.inventory-dashboard {
+  margin-top: 2rem;
+}
+
+.inventory-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 3rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid #e5e7eb;
+  flex-wrap: wrap;
+  gap: 1.5rem;
+}
+
+.inventory-header h2 {
+  font-size: 2rem;
+  color: rgb(35,35,35);
+  margin: 0;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.inventory-stats {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.inventory-filters {
+  margin-bottom: 2rem;
+  padding: 1.5rem;
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+}
+
+.inventory-content {
+  margin-top: 2rem;
+}
+
+.inventory-table-container {
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+.stat-card {
+  background-color: #ffffff;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  padding: 1rem 1.5rem;
+  box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+}
+
+.stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: rgb(35,35,35);
+  margin-bottom: 0.25rem;
+}
+
+.stat-label {
+  font-size: 0.875rem;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-family: 'Oswald', sans-serif;
 }
 
 /* Dashboard Layout Styles */
@@ -1372,7 +1450,7 @@
   border: 1px solid #d1d5db;
   border-radius: 8px;
   background-color: #ffffff;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.95rem;
   font-family: 'Inter', sans-serif;
   transition: all 0.3s ease;
@@ -1380,7 +1458,7 @@
 
 .parts-search-input:focus {
   outline: none;
-  border-color: #2563eb;
+  border-color: rgb(35,35,35);
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
@@ -1410,7 +1488,7 @@
   cursor: pointer;
   transition: background-color 0.2s ease;
   font-size: 0.95rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
 }
 
 .dropdown-option:hover {
@@ -1428,7 +1506,7 @@
 
 .dropdown-option input[type="checkbox"] {
   cursor: pointer;
-  accent-color: #2563eb;
+  accent-color: rgb(35,35,35);
 }
 
 .dropdown-empty {
@@ -1448,7 +1526,7 @@
   margin: 0 0 1.5rem 0;
   font-size: 1.25rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-family: 'Oswald', sans-serif;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1493,7 +1571,7 @@
 }
 
 .maintenance-type {
-  background-color: #2563eb;
+  background-color: rgb(35,35,35);
   color: #ffffff;
   padding: 0.25rem 0.75rem;
   border-radius: 4px;
@@ -1512,7 +1590,7 @@
 
 .maintenance-item-title {
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   margin-bottom: 0.5rem;
   font-size: 1rem;
 }
@@ -1567,7 +1645,7 @@
   margin: 0 0 1.5rem 0;
   font-size: 1.25rem;
   font-weight: 600;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-family: 'Oswald', sans-serif;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1718,7 +1796,7 @@
 .report-detail-section strong {
   display: block;
   margin-bottom: 0.5rem;
-  color: #1a1a1a;
+  color: rgb(35,35,35);
   font-size: 0.9rem;
 }
 
