@@ -105,12 +105,17 @@ CREATE TABLE IF NOT EXISTS systems (
   name TEXT NOT NULL,
   description TEXT,
   usage_time NUMERIC(10, 2) DEFAULT 0.0,
+  time_since_last_maintenance NUMERIC(10, 2) DEFAULT 0.0,
+  in_usage BOOLEAN DEFAULT true,
   created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
   updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 -- Add system_id to parts table (nullable, for one-to-many relationship)
 ALTER TABLE parts ADD COLUMN IF NOT EXISTS system_id BIGINT REFERENCES systems(id) ON DELETE SET NULL;
+
+-- Add in_usage column to systems table (for existing databases)
+ALTER TABLE systems ADD COLUMN IF NOT EXISTS in_usage BOOLEAN DEFAULT true;
 
 -- Create junction table for many-to-many relationship between systems and parts
 CREATE TABLE IF NOT EXISTS system_parts (
