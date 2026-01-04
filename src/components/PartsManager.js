@@ -53,12 +53,16 @@ const detectVendorFromPartNumber = (partNumber) => {
 };
 
 function PartsManager() {
-  const [mainView, setMainView] = useState('parts'); // 'parts', 'manufacturing', or 'buylist'
+  const [mainView, setMainView] = useState('parts'); // 'parts', 'manufacturing', 'buylist', or 'inventory'
   const [subsystems, setSubsystems] = useState([]);
   const [activeTab, setActiveTab] = useState(null);
   const [parts, setParts] = useState([]);
   const [manufacturingParts, setManufacturingParts] = useState([]);
   const [cotsParts, setCotsParts] = useState([]);
+  const [inventoryParts, setInventoryParts] = useState([]);
+  const [inventorySearchQuery, setInventorySearchQuery] = useState('');
+  const [editingQuantityId, setEditingQuantityId] = useState(null);
+  const [tempQuantity, setTempQuantity] = useState(0);
   const [vendorFilter, setVendorFilter] = useState('all');
   const [buyListSearchQuery, setBuyListSearchQuery] = useState('');
   const [selectedCotsParts, setSelectedCotsParts] = useState([]);
@@ -153,6 +157,13 @@ function PartsManager() {
     }
   }, [mainView]);
 
+  // Fetch inventory parts when inventory view is active
+  useEffect(() => {
+    if (mainView === 'inventory') {
+      fetchInventoryParts();
+    }
+  }, [mainView]);
+
   const fetchSubsystems = async () => {
     try {
       const { data, error } = await supabase
@@ -238,6 +249,52 @@ function PartsManager() {
     } catch (error) {
       console.error('Error fetching COTS parts:', error);
       setCotsParts([]);
+    }
+  };
+
+  const fetchInventoryParts = async () => {
+    try {
+      const { data, error } = await supabase
+        .from('parts')
+        .select(`
+          *,
+          subsystems (
+            id,
+            name
+          )
+        `)
+        .order('name', { ascending: true });
+
+      if (error) throw error;
+      setInventoryParts(data || []);
+    } catch (error) {
+      console.error('Error fetching inventory parts:', error);
+      setInventoryParts([]);
+    }
+  };
+
+  const handleUpdateQuantity = async (partId, newQuantity) => {
+    try {
+      const quantity = parseInt(newQuantity) || 0;
+      if (quantity < 0) {
+        showAlert('Quantity cannot be negative');
+        return;
+      }
+
+      const { error } = await supabase
+        .from('parts')
+        .update({ quantity })
+        .eq('id', partId);
+
+      if (error) throw error;
+      fetchInventoryParts();
+      // Also refresh buy list if it's open
+      if (mainView === 'buylist') {
+        fetchCOTSParts();
+      }
+    } catch (error) {
+      console.error('Error updating quantity:', error);
+      showAlert('Error updating quantity: ' + error.message);
     }
   };
 
@@ -1116,6 +1173,12 @@ function PartsManager() {
           onClick={() => setMainView('buylist')}
         >
           Buy List
+        </button>
+        <button
+          className={`main-view-tab ${mainView === 'inventory' ? 'active' : ''}`}
+          onClick={() => setMainView('inventory')}
+        >
+          Inventory
         </button>
       </div>
 
@@ -2097,6 +2160,7 @@ function PartsManager() {
                       <th>Status</th>
                       <th>Drawn By</th>
                       <th>Reviewed By</th>
+                      <th>COTS</th>
                       <th>Details</th>
                       <th>Notes</th>
                       <th>Actions</th>
@@ -2158,6 +2222,9 @@ function PartsManager() {
                       <td>{part.drawn_by || '-'}</td>
                       <td>{part.reviewed_by || '-'}</td>
                       <td>
+                        {part.is_cots ? 'Yes' : 'No'}
+                      </td>
+                      <td>
                         <button
                           onClick={() => handleShowDetails(part)}
                           className="btn btn-secondary btn-sm"
@@ -2165,17 +2232,6 @@ function PartsManager() {
                         >
                           Details
                         </button>
-                        {part.is_cots && (
-                          <span style={{ 
-                            marginLeft: '0.5rem', 
-                            fontSize: '0.75rem', 
-                            color: '#2563eb',
-                            fontWeight: '600',
-                            textTransform: 'uppercase'
-                          }}>
-                            COTS
-                          </span>
-                        )}
                       </td>
                       <td>
                         {part.status === 'flagged' && part.details?.flag_note && (
@@ -2542,6 +2598,7 @@ function PartsManager() {
                         </th>
                         <th>Part Name</th>
                         <th>Qty</th>
+                        <th>Stock</th>
                         <th>Part Number</th>
                         <th>Vendor</th>
                         <th>Link</th>
@@ -2556,6 +2613,7 @@ function PartsManager() {
                         const partNumber = part.details?.part_number || '';
                         const vendor = detectVendorFromPartNumber(partNumber);
                         const qty = part.details?.order_quantity || part.details?.part_quantity || '-';
+                        const stock = part.quantity || 0;
                         
                         return (
                           <tr key={part.id} className={selectedCotsParts.includes(part.id) ? 'selected' : ''}>
@@ -2568,6 +2626,7 @@ function PartsManager() {
                             </td>
                             <td>{part.name}</td>
                             <td>{qty}</td>
+                            <td>{stock}</td>
                             <td>{partNumber || '-'}</td>
                             <td>{vendor}</td>
                             <td>
@@ -2647,6 +2706,160 @@ function PartsManager() {
                                   title="Mark as bought"
                                 >
                                   Mark as Bought
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* Inventory View */}
+      {mainView === 'inventory' && (
+        <div className="inventory-dashboard">
+          <div className="inventory-header">
+            <h2>Inventory</h2>
+            <div className="inventory-stats">
+              <div className="stat-card">
+                <div className="stat-value">{inventoryParts.length}</div>
+                <div className="stat-label">Total Parts</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {inventoryParts.filter(p => (p.quantity || 0) > 0).length}
+                </div>
+                <div className="stat-label">In Stock</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-value">
+                  {inventoryParts.reduce((sum, p) => sum + (p.quantity || 0), 0)}
+                </div>
+                <div className="stat-label">Total Quantity</div>
+              </div>
+            </div>
+          </div>
+
+          <div className="inventory-filters">
+            <div className="parts-search-container" style={{ maxWidth: '400px' }}>
+              <input
+                type="text"
+                className="parts-search-input"
+                placeholder="Search parts..."
+                value={inventorySearchQuery}
+                onChange={(e) => setInventorySearchQuery(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <div className="inventory-content">
+            {inventoryParts.length === 0 ? (
+              <div className="empty-state">
+                <p>No parts found. Add parts to see them in inventory.</p>
+              </div>
+            ) : (() => {
+              // Filter parts based on search query
+              let filteredParts = inventoryParts;
+              if (inventorySearchQuery.trim() !== '') {
+                const searchLower = inventorySearchQuery.toLowerCase();
+                filteredParts = inventoryParts.filter(p => {
+                  return (
+                    p.name.toLowerCase().includes(searchLower) ||
+                    (p.subsystems?.name || '').toLowerCase().includes(searchLower) ||
+                    (p.details?.part_number || '').toLowerCase().includes(searchLower)
+                  );
+                });
+              }
+
+              return filteredParts.length === 0 ? (
+                <div className="empty-state">
+                  <p>No parts found matching your search.</p>
+                </div>
+              ) : (
+                <div className="inventory-table-container">
+                  <table className="buy-list-table">
+                    <thead>
+                      <tr>
+                        <th>Part Name</th>
+                        <th>Subsystem</th>
+                        <th>Part Number</th>
+                        <th>Quantity</th>
+                        <th>Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredParts.map((part) => {
+                        const isEditing = editingQuantityId === part.id;
+                        
+                        return (
+                          <tr key={part.id}>
+                            <td>{part.name}</td>
+                            <td>{part.subsystems?.name || '-'}</td>
+                            <td>{part.details?.part_number || '-'}</td>
+                            <td>
+                              {isEditing ? (
+                                <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                  <input
+                                    type="number"
+                                    value={tempQuantity}
+                                    onChange={(e) => setTempQuantity(parseInt(e.target.value) || 0)}
+                                    min="0"
+                                    style={{
+                                      width: '80px',
+                                      padding: '0.5rem',
+                                      border: '1px solid #d1d5db',
+                                      borderRadius: '4px'
+                                    }}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') {
+                                        handleUpdateQuantity(part.id, tempQuantity);
+                                        setEditingQuantityId(null);
+                                      } else if (e.key === 'Escape') {
+                                        setTempQuantity(part.quantity || 0);
+                                        setEditingQuantityId(null);
+                                      }
+                                    }}
+                                    autoFocus
+                                  />
+                                  <button
+                                    onClick={() => {
+                                      handleUpdateQuantity(part.id, tempQuantity);
+                                      setEditingQuantityId(null);
+                                    }}
+                                    className="btn btn-primary btn-sm"
+                                  >
+                                    Save
+                                  </button>
+                                  <button
+                                    onClick={() => {
+                                      setTempQuantity(part.quantity || 0);
+                                      setEditingQuantityId(null);
+                                    }}
+                                    className="btn btn-secondary btn-sm"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              ) : (
+                                <span>{part.quantity || 0}</span>
+                              )}
+                            </td>
+                            <td>
+                              {!isEditing && (
+                                <button
+                                  onClick={() => {
+                                    setTempQuantity(part.quantity || 0);
+                                    setEditingQuantityId(part.id);
+                                  }}
+                                  className="btn btn-primary btn-sm"
+                                >
+                                  Edit Quantity
                                 </button>
                               )}
                             </td>
