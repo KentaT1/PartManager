@@ -19,6 +19,8 @@ function Lifecycle() {
   
   // Dashboard state
   const [maintenanceItems, setMaintenanceItems] = useState([]);
+  const [maintenanceItemsKey, setMaintenanceItemsKey] = useState(0); // Force re-render key
+  const [predictedWarnings, setPredictedWarnings] = useState([]);
   const [selectedSystemForFailure, setSelectedSystemForFailure] = useState('');
   const [failureComponents, setFailureComponents] = useState('');
   const [failureComment, setFailureComment] = useState('');
@@ -26,9 +28,11 @@ function Lifecycle() {
   const [partsSearchTerm, setPartsSearchTerm] = useState('');
   const [showPartsDropdown, setShowPartsDropdown] = useState(false);
   const [wpilogFile, setWpilogFile] = useState(null);
+  const [wpilogTime, setWpilogTime] = useState('');
   const [uploadingWpilog, setUploadingWpilog] = useState(false);
 
   // System Management state
+  // eslint-disable-next-line no-unused-vars
   const [editingSystem, setEditingSystem] = useState(null);
   const [systemParts, setSystemParts] = useState({}); // systemId -> array of part IDs
   const [systemSubsystems, setSystemSubsystems] = useState({}); // systemId -> array of subsystem IDs
@@ -47,12 +51,9 @@ function Lifecycle() {
   const [newMaintenance, setNewMaintenance] = useState({
     title: '',
     description: '',
-    due_after_matches: '',
-    type: 'maintenance',
-    repeat: true,
-    repeat_every_matches: ''
+    repeat_interval_matches: '',
+    type: 'maintenance'
   });
-  const [matchesAhead, setMatchesAhead] = useState(10); // Default to 10 matches ahead
   
   // Maintenance Details Modal state
   const [showMaintenanceDetails, setShowMaintenanceDetails] = useState(false);
@@ -60,6 +61,7 @@ function Lifecycle() {
   
   // Confirmation Modal state
   const [showConfirmModal, setShowConfirmModal] = useState(false);
+  const [showPrematureConfirm, setShowPrematureConfirm] = useState(false);
   const [maintenanceToComplete, setMaintenanceToComplete] = useState(null);
   
   // Edit Maintenance Modal state
@@ -69,16 +71,6 @@ function Lifecycle() {
     description: ''
   });
   
-  // Edit Upcoming Maintenance Modal state
-  const [editingUpcomingMaintenance, setEditingUpcomingMaintenance] = useState(null);
-  const [editUpcomingMaintenanceForm, setEditUpcomingMaintenanceForm] = useState({
-    title: '',
-    description: '',
-    due_after_matches: '',
-    type: 'maintenance',
-    repeat: false,
-    repeat_every_matches: ''
-  });
 
   useEffect(() => {
     fetchSystems();
@@ -86,7 +78,9 @@ function Lifecycle() {
     fetchParts();
     if (activeTab === 'dashboard') {
       fetchMaintenanceItems();
+      fetchPredictedWarnings();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab]);
 
   // Close dropdown when clicking outside
@@ -221,7 +215,9 @@ function Lifecycle() {
         .limit(50);
 
       if (error) throw error;
-      setMaintenanceItems(data || []);
+      // Force new array reference to ensure React detects the change
+      const items = data ? [...data] : [];
+      setMaintenanceItems(items);
     } catch (error) {
       console.error('Error fetching maintenance items:', error);
       // If join fails, try without join
@@ -246,7 +242,7 @@ function Lifecycle() {
             return { ...item, systems: systemData };
           })
         );
-        setMaintenanceItems(itemsWithSystems);
+        setMaintenanceItems([...itemsWithSystems]);
       } catch (fallbackError) {
         console.error('Error in fallback fetch:', fallbackError);
         setMaintenanceItems([]);
@@ -254,115 +250,311 @@ function Lifecycle() {
     }
   };
 
+  // Fetch predicted warnings based on MTBF
+  const fetchPredictedWarnings = async () => {
+    if (!isSupabaseConfigured) return;
+
+    try {
+      const { data, error } = await supabase
+        .from('predicted_warnings')
+        .select(`
+          *,
+          systems!predicted_warnings_system_id_fkey (
+            id,
+            name,
+            usage_time
+          )
+        `)
+        .eq('dismissed', false)
+        .order('predicted_failure_runtime_minutes', { ascending: true })
+        .limit(50);
+
+      if (error) throw error;
+      
+      // Force new array reference
+      const warnings = data ? [...data] : [];
+      setPredictedWarnings(warnings);
+    } catch (error) {
+      console.error('Error fetching predicted warnings:', error);
+      // If join fails, try without join
+      try {
+        const { data, error: simpleError } = await supabase
+          .from('predicted_warnings')
+          .select('*')
+          .eq('dismissed', false)
+          .order('predicted_failure_runtime_minutes', { ascending: true })
+          .limit(50);
+        
+        if (simpleError) throw simpleError;
+        
+        // Manually join with systems
+        const warningsWithSystems = await Promise.all(
+          (data || []).map(async (warning) => {
+            const { data: systemData } = await supabase
+              .from('systems')
+              .select('id, name, usage_time')
+              .eq('id', warning.system_id)
+              .single();
+            return { ...warning, systems: systemData };
+          })
+        );
+        setPredictedWarnings([...warningsWithSystems]);
+      } catch (fallbackError) {
+        console.error('Error in fallback fetch predicted warnings:', fallbackError);
+        setPredictedWarnings([]);
+      }
+    }
+  };
+
+  // Calculate MTBF for a system and generate predicted warning
+  const calculateMTBFAndGenerateWarning = async (systemId) => {
+    if (!isSupabaseConfigured) return;
+
+    try {
+      // Get system data
+      const { data: systemData, error: systemError } = await supabase
+        .from('systems')
+        .select('usage_time')
+        .eq('id', systemId)
+        .single();
+
+      if (systemError) throw systemError;
+      if (!systemData) return;
+
+      // Get all failures for this system
+      const { data: failuresData, error: failuresError } = await supabase
+        .from('failures')
+        .select('components_needing_replacement, comment, created_at')
+        .eq('system_id', systemId)
+        .order('created_at', { ascending: false });
+
+      if (failuresError) throw failuresError;
+
+      const totalFailures = failuresData?.length || 0;
+      const usageTimeMinutes = systemData.usage_time || 0;
+
+      // Calculate MTBF: Total Operating Time / Number of Failures
+      // Need at least 2 failures to calculate meaningful MTBF
+      if (totalFailures < 2) {
+        // Not enough data, don't generate warning yet
+        return;
+      }
+
+      const mtbfMinutes = usageTimeMinutes / totalFailures;
+
+      // Update system with calculated MTBF
+      const { error: updateError } = await supabase
+        .from('systems')
+        .update({
+          mtbf_minutes: mtbfMinutes,
+          total_failures: totalFailures,
+          last_failure_at: failuresData[0]?.created_at || null
+        })
+        .eq('id', systemId);
+
+      if (updateError) throw updateError;
+
+      // Generate predicted warning (predict at 80% of MTBF for proactive maintenance)
+      const predictedFailureRuntimeMinutes = usageTimeMinutes + (mtbfMinutes * 0.8);
+
+      // Analyze failure history to identify common failure components
+      const componentFrequency = {};
+      failuresData.forEach(failure => {
+        if (failure.components_needing_replacement && Array.isArray(failure.components_needing_replacement)) {
+          failure.components_needing_replacement.forEach(component => {
+            componentFrequency[component] = (componentFrequency[component] || 0) + 1;
+          });
+        }
+      });
+
+      // Get most common failure components (top 3)
+      const likelyFailures = Object.entries(componentFrequency)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([component]) => component);
+
+      // Generate review notes
+      const reviewNotes = `Based on MTBF analysis (${(mtbfMinutes / 60).toFixed(1)} hours), this system is predicted to need review at ${(predictedFailureRuntimeMinutes / 60).toFixed(1)} hours of runtime. ` +
+        (likelyFailures.length > 0
+          ? `Common failure components to review: ${likelyFailures.join(', ')}. `
+          : '') +
+        `Review system for signs of wear, check all moving parts, and verify proper operation.`;
+
+      // Check if a warning already exists for this system
+      const { data: existingWarnings } = await supabase
+        .from('predicted_warnings')
+        .select('id')
+        .eq('system_id', systemId)
+        .eq('dismissed', false)
+        .limit(1);
+
+      if (existingWarnings && existingWarnings.length > 0) {
+        // Update existing warning
+        const { error: updateWarningError } = await supabase
+          .from('predicted_warnings')
+          .update({
+            predicted_failure_runtime_minutes: predictedFailureRuntimeMinutes,
+            review_notes: reviewNotes,
+            likely_failures: likelyFailures,
+            mtbf_minutes: mtbfMinutes
+          })
+          .eq('id', existingWarnings[0].id);
+
+        if (updateWarningError) throw updateWarningError;
+      } else {
+        // Create new warning
+        const { error: insertError } = await supabase
+          .from('predicted_warnings')
+          .insert([{
+            system_id: systemId,
+            predicted_failure_runtime_minutes: predictedFailureRuntimeMinutes,
+            review_notes: reviewNotes,
+            likely_failures: likelyFailures,
+            mtbf_minutes: mtbfMinutes
+          }]);
+
+        if (insertError) throw insertError;
+      }
+    } catch (error) {
+      console.error('Error calculating MTBF and generating warning:', error);
+      // Don't throw - this is not critical for failure reporting
+    }
+  };
+
+  // Recalculate predicted warnings for all systems that have predicted warnings
+  // This should be called when usage_time changes
+  const recalculatePredictedWarningsForAllSystems = async () => {
+    if (!isSupabaseConfigured) return;
+
+    try {
+      // Get all systems that have predicted warnings
+      const { data: warningsData, error: warningsError } = await supabase
+        .from('predicted_warnings')
+        .select('system_id')
+        .eq('dismissed', false);
+
+      if (warningsError) throw warningsError;
+      if (!warningsData || warningsData.length === 0) return;
+
+      // Get unique system IDs
+      const systemIds = [...new Set(warningsData.map(w => w.system_id))];
+
+      // Recalculate MTBF and update predicted warnings for each system
+      await Promise.all(systemIds.map(systemId => calculateMTBFAndGenerateWarning(systemId)));
+
+      // Refresh predicted warnings list
+      await fetchPredictedWarnings();
+    } catch (error) {
+      console.error('Error recalculating predicted warnings:', error);
+      // Don't throw - this is not critical
+    }
+  };
+
+  // Dismiss a predicted warning
+  const handleDismissPredictedWarning = async (warningId) => {
+    try {
+      const { error } = await supabase
+        .from('predicted_warnings')
+        .update({ 
+          dismissed: true,
+          dismissed_at: new Date().toISOString()
+        })
+        .eq('id', warningId);
+
+      if (error) throw error;
+      fetchPredictedWarnings();
+    } catch (error) {
+      console.error('Error dismissing predicted warning:', error);
+      showAlert('Error dismissing warning: ' + error.message);
+    }
+  };
+
+  // Get filtered predicted warnings (only show warnings that are approaching)
+  const getFilteredPredictedWarnings = () => {
+    if (!predictedWarnings || predictedWarnings.length === 0) return [];
+    
+    return predictedWarnings
+      .filter(warning => {
+        const system = warning.systems || systems.find(s => s.id === warning.system_id);
+        if (!system) return false;
+        
+        const currentRuntimeMinutes = system.usage_time || 0;
+        const predictedRuntimeMinutes = warning.predicted_failure_runtime_minutes || 0;
+        
+        // Only show warnings where predicted runtime is >= current runtime (upcoming or due)
+        return predictedRuntimeMinutes >= currentRuntimeMinutes;
+      })
+      .map(warning => {
+        const system = warning.systems || systems.find(s => s.id === warning.system_id);
+        const currentRuntimeMinutes = system?.usage_time || 0;
+        const predictedRuntimeMinutes = warning.predicted_failure_runtime_minutes || 0;
+        const minutesUntilPredicted = predictedRuntimeMinutes - currentRuntimeMinutes;
+        const matchesUntilPredicted = minutesUntilPredicted / 2.5;
+        const isDue = minutesUntilPredicted <= 0;
+        
+        return {
+          ...warning,
+          minutesUntilPredicted,
+          matchesUntilPredicted,
+          isDue
+        };
+      })
+      .sort((a, b) => a.predicted_failure_runtime_minutes - b.predicted_failure_runtime_minutes);
+  };
+
   // Calculate filtered maintenance items based on matches ahead
+  // Calculate maintenance items - show one instance per maintenance schedule
   const getFilteredMaintenanceItems = () => {
     if (!maintenanceItems || maintenanceItems.length === 0) return [];
     
-    const runtimePerMatch = 2.5 / 60; // 2.5 minutes per match in hours
-    const filteredInstances = [];
+    const result = [];
     
-    maintenanceItems.forEach((item) => {
+    // Filter out any items that are marked as completed (safety check)
+    const activeItems = maintenanceItems.filter(item => !item.completed);
+    
+    activeItems.forEach((item) => {
       const system = item.systems || systems.find(s => s.id === item.system_id);
       if (!system) return;
       
-      const currentRuntimeHours = system.usage_time || 0;
-      const currentRuntimeMinutes = currentRuntimeHours * 60;
-      const maxAheadMinutes = matchesAhead * 2.5;
-      const maxAheadRuntimeMinutes = currentRuntimeMinutes + maxAheadMinutes;
+      const currentRuntimeMinutes = system.usage_time || 0;
       
-      // Extract target runtime and repeat info from description
-      const desc = item.description || '';
-      let initialTargetMinutes = currentRuntimeMinutes + 12.5; // Default to 5 matches ahead
-      const runtimeMatch = desc.match(/target runtime: ([\d.]+) hours/);
-      if (runtimeMatch) {
-        initialTargetMinutes = parseFloat(runtimeMatch[1]) * 60;
-      } else {
-        const matchesMatch = desc.match(/after ([\d.]+) match/);
-        if (matchesMatch) {
-          const matches = parseFloat(matchesMatch[1]);
-          initialTargetMinutes = currentRuntimeMinutes + (matches * 2.5);
+      // Get next due runtime from database column, or calculate from description (backward compatibility)
+      // Note: next_due_runtime_hours is still in hours in the database, so we convert it to minutes
+      let nextDueRuntimeHours = item.next_due_runtime_hours;
+      let repeatIntervalMatches = item.repeat_interval_matches;
+      
+      // Backward compatibility: extract from description if columns are null
+      if (!nextDueRuntimeHours || !repeatIntervalMatches) {
+        const desc = item.description || '';
+        const runtimeMatch = desc.match(/target runtime: ([\d.]+) hours/);
+        if (runtimeMatch) {
+          nextDueRuntimeHours = parseFloat(runtimeMatch[1]);
+        }
+        const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+        if (repeatMatch) {
+          repeatIntervalMatches = parseFloat(repeatMatch[1]);
         }
       }
       
-      // Check if it repeats
-      const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
-      const repeatEveryMatches = repeatMatch ? parseFloat(repeatMatch[1]) : null;
+      // Skip if we don't have the required data
+      if (!nextDueRuntimeHours || !repeatIntervalMatches) return;
       
-      if (repeatEveryMatches) {
-        // Show all instances within the matches ahead window, including overdue ones
-        const repeatIntervalMinutes = repeatEveryMatches * 2.5;
-        let instanceMinutes = initialTargetMinutes;
-        let instanceNumber = 0;
-        
-        // If the first instance is overdue, calculate the first overdue instance directly
-        if (initialTargetMinutes <= currentRuntimeMinutes) {
-          // Calculate how many intervals have passed since the initial target
-          const intervalsPassed = Math.floor((currentRuntimeMinutes - initialTargetMinutes) / repeatIntervalMinutes);
-          // The most recent overdue instance is at intervalsPassed (if it's still overdue) or intervalsPassed-1
-          let mostRecentOverdueNumber = intervalsPassed;
-          let mostRecentOverdueMinutes = initialTargetMinutes + (mostRecentOverdueNumber * repeatIntervalMinutes);
-          
-          // If this instance is not overdue (it's in the future), go back one
-          if (mostRecentOverdueMinutes > currentRuntimeMinutes) {
-            mostRecentOverdueNumber--;
-            mostRecentOverdueMinutes -= repeatIntervalMinutes;
-          }
-          
-          // Limit to showing at most 20 overdue instances back from the most recent one
-          // Start from the first overdue instance we want to show
-          const maxOverdueToShow = 20;
-          instanceNumber = Math.max(mostRecentOverdueNumber - (maxOverdueToShow - 1), 0);
-          instanceMinutes = initialTargetMinutes + (instanceNumber * repeatIntervalMinutes);
-        }
-        
-        // Now collect instances starting from here, including overdue and upcoming within window
-        while (true) {
-          const matchesRemaining = (instanceMinutes - currentRuntimeMinutes) / 2.5;
-          const isDue = instanceMinutes <= currentRuntimeMinutes;
-          
-          // Include if overdue OR within the matches ahead window
-          if (isDue || instanceMinutes <= maxAheadRuntimeMinutes) {
-            filteredInstances.push({
-              ...item,
-              instanceMinutes,
-              instanceNumber,
-              matchesRemaining,
-              isDue
-            });
-          }
-          
-          // Stop if we're past the window and not overdue
-          if (instanceMinutes > maxAheadRuntimeMinutes && !isDue) {
-            break;
-          }
-          
-          instanceMinutes += repeatIntervalMinutes;
-          instanceNumber++;
-          
-          // Safety limit to prevent too many iterations
-          if (instanceNumber > 100) {
-            break;
-          }
-        }
-      } else {
-        // Single instance - include if overdue OR within the matches ahead window
-        const matchesRemaining = (initialTargetMinutes - currentRuntimeMinutes) / 2.5;
-        const isDue = initialTargetMinutes <= currentRuntimeMinutes;
-        
-        if (isDue || initialTargetMinutes <= maxAheadRuntimeMinutes) {
-          filteredInstances.push({
-            ...item,
-            instanceMinutes: initialTargetMinutes,
-            instanceNumber: 0,
-            matchesRemaining,
-            isDue
-          });
-        }
-      }
+      const nextDueRuntimeMinutes = nextDueRuntimeHours * 60;
+      const matchesRemaining = (nextDueRuntimeMinutes - currentRuntimeMinutes) / 2.5;
+      const isDue = nextDueRuntimeMinutes <= currentRuntimeMinutes;
+      
+      // Show one instance per maintenance schedule
+      result.push({
+        ...item,
+        nextDueRuntimeHours,
+        repeatIntervalMatches,
+        matchesRemaining,
+        isDue
+      });
     });
     
-    // Sort by instanceMinutes (when maintenance is due)
-    return filteredInstances.sort((a, b) => a.instanceMinutes - b.instanceMinutes);
+    // Sort by next due runtime (overdue first, then upcoming)
+    return result.sort((a, b) => a.nextDueRuntimeHours - b.nextDueRuntimeHours);
   };
 
   const showAlert = (message) => {
@@ -384,16 +576,15 @@ function Lifecycle() {
     }
 
     try {
-      // Convert minutes to hours for database storage
+      // Store usage time in minutes
       const usageTimeMinutes = parseFloat(newSystem.usage_time) || 0;
-      const usageTimeHours = usageTimeMinutes / 60;
       
       const { error } = await supabase
         .from('systems')
         .insert([{
           name: newSystem.name.trim(),
           description: newSystem.description.trim() || null,
-          usage_time: usageTimeHours,
+          usage_time: usageTimeMinutes,
           in_usage: true
         }]);
 
@@ -564,8 +755,9 @@ function Lifecycle() {
   };
 
   const handleWpilogUpload = async () => {
-    if (!wpilogFile) {
-      showAlert('Please select a wpilog file');
+    // Check if either file or manual time is provided
+    if (!wpilogFile && !wpilogTime) {
+      showAlert('Please either select a wpilog file or enter time in minutes');
       return;
     }
 
@@ -577,13 +769,26 @@ function Lifecycle() {
     setUploadingWpilog(true);
 
     try {
-      // Read the file as ArrayBuffer
-      const arrayBuffer = await wpilogFile.arrayBuffer();
+      let timeValue; // Time in minutes
       
-      // Parse the log file to get elapsed time in minutes, then convert to hours
-      const { parseWpilogFileRobust } = await import('../utils/logParser');
-      const elapsedMinutes = await parseWpilogFileRobust(arrayBuffer);
-      const timeValue = elapsedMinutes / 60; // Convert minutes to hours
+      if (wpilogFile) {
+        // Read the file as ArrayBuffer
+        const arrayBuffer = await wpilogFile.arrayBuffer();
+        
+        // Parse the log file to get elapsed time in minutes
+        const { parseWpilogFileRobust } = await import('../utils/logParser');
+        const elapsedMinutes = await parseWpilogFileRobust(arrayBuffer);
+        timeValue = elapsedMinutes; // Already in minutes
+      } else {
+        // Manual time entry
+        const timeValueMinutes = parseFloat(wpilogTime);
+        if (isNaN(timeValueMinutes) || timeValueMinutes <= 0) {
+          showAlert('Please enter a valid time value in minutes');
+          setUploadingWpilog(false);
+          return;
+        }
+        timeValue = timeValueMinutes; // Already in minutes
+      }
 
       // Fetch all systems
       const { data: allSystems, error: fetchError } = await supabase
@@ -597,10 +802,7 @@ function Lifecycle() {
         return;
       }
 
-      // Insert wpilog record for all systems (or we could store it once)
-      // For now, we'll just update usage times
-      
-      // Update all systems' usage_time by adding elapsed time to each
+      // Update all systems' usage_time by adding elapsed time (in minutes) to each
       const updatePromises = allSystems.map(system => {
         const currentUsageTime = system.usage_time || 0;
         const newUsageTime = currentUsageTime + timeValue;
@@ -619,14 +821,30 @@ function Lifecycle() {
         throw new Error(`Failed to update ${errors.length} system(s)`);
       }
 
+      // Prepare success message before resetting form
+      const wasFileUpload = !!wpilogFile;
+      const timeDisplay = wasFileUpload 
+        ? `${timeValue.toFixed(1)} minutes (from file)`
+        : `${timeValue.toFixed(1)} minutes`;
+
+      // Reset form
       setWpilogFile(null);
+      setWpilogTime('');
       
       // Reset file input
       const fileInput = document.querySelector('input[type="file"]');
       if (fileInput) fileInput.value = '';
       
       fetchSystems();
-      showAlert(`Success! Added ${timeValue.toFixed(2)} hours to all ${allSystems.length} system(s).`);
+      fetchMaintenanceItems(); // Refresh the upcoming maintenance section
+      
+      // Recalculate predicted warnings for all systems since usage_time has changed
+      await recalculatePredictedWarningsForAllSystems();
+      
+      if (selectedSystemDetails) {
+        await fetchSystemFailures(selectedSystemDetails.id); // Refresh selected system's upcoming maintenance
+      }
+      showAlert(`Success! Added ${timeDisplay} to all ${allSystems.length} system(s).`);
     } catch (error) {
       console.error('Error uploading wpilog:', error);
       showAlert('Error uploading wpilog: ' + error.message);
@@ -671,6 +889,9 @@ function Lifecycle() {
 
       if (updateError) throw updateError;
 
+      // Calculate MTBF and generate predicted warning
+      await calculateMTBFAndGenerateWarning(parseInt(selectedSystemForFailure));
+
       setSelectedSystemForFailure('');
       setFailureComponents('');
       setFailureComment('');
@@ -678,6 +899,13 @@ function Lifecycle() {
       setPartsSearchTerm('');
       setShowPartsDropdown(false);
       fetchSystems(); // Refresh systems to show updated time_since_last_maintenance
+      fetchPredictedWarnings(); // Refresh predicted warnings
+      
+      // Refresh timeline if System Details modal is open for this system
+      if (selectedSystemDetails && selectedSystemDetails.id === parseInt(selectedSystemForFailure)) {
+        await fetchSystemFailures(parseInt(selectedSystemForFailure));
+      }
+      
       showAlert('Failure reported successfully');
     } catch (error) {
       console.error('Error reporting failure:', error);
@@ -750,22 +978,22 @@ function Lifecycle() {
     if (!isSupabaseConfigured) return;
 
     try {
-      // Fetch failures
+      // Fetch failures (sorted by created_at ascending - oldest first for timeline)
       const { data: failuresData, error: failuresError } = await supabase
         .from('failures')
         .select('*')
         .eq('system_id', systemId)
-        .order('created_at', { ascending: false });
+        .order('created_at', { ascending: true });
 
       if (failuresError) throw failuresError;
 
-      // Fetch completed maintenance items
+      // Fetch completed maintenance items (sorted by completed_at ascending - oldest first for timeline)
       const { data: completedMaintenanceData, error: completedMaintenanceError } = await supabase
         .from('maintenance_reviews')
         .select('*')
         .eq('system_id', systemId)
         .eq('completed', true)
-        .order('completed_at', { ascending: false });
+        .order('completed_at', { ascending: true });
 
       if (completedMaintenanceError) throw completedMaintenanceError;
 
@@ -800,53 +1028,42 @@ function Lifecycle() {
       return;
     }
 
-    if (!newMaintenance.due_after_matches || parseFloat(newMaintenance.due_after_matches) <= 0) {
-      showAlert('Please enter a valid number of matches');
+    if (!newMaintenance.repeat_interval_matches || parseFloat(newMaintenance.repeat_interval_matches) <= 0) {
+      showAlert('Please enter a valid repeat interval (in matches)');
       return;
     }
 
     try {
-      // Calculate runtime: 1 FRC match = 2:30 = 150 seconds = 2.5 minutes = 0.04167 hours
-      const matches = parseFloat(newMaintenance.due_after_matches);
-      const runtimePerMatch = 2.5 / 60; // 2.5 minutes in hours
-      const targetRuntime = (selectedSystemDetails.usage_time || 0) + (matches * runtimePerMatch);
-      
-      // Store matches info and repeat info in description
-      let matchesInfo = `Scheduled after ${matches} match${matches !== 1 ? 'es' : ''} (target runtime: ${targetRuntime.toFixed(2)} hours)`;
-      
-      if (newMaintenance.repeat && newMaintenance.repeat_every_matches) {
-        const repeatMatches = parseFloat(newMaintenance.repeat_every_matches);
-        matchesInfo += ` | Repeats every ${repeatMatches} match${repeatMatches !== 1 ? 'es' : ''}`;
-      }
-      
-      const fullDescription = newMaintenance.description.trim() 
-        ? `${newMaintenance.description.trim()}\n\n${matchesInfo}`
-        : matchesInfo;
+      // Calculate runtime: 1 FRC match = 2:30 = 150 seconds = 2.5 minutes
+      const repeatInterval = parseFloat(newMaintenance.repeat_interval_matches);
+      const runtimePerMatchMinutes = 2.5; // 2.5 minutes per match
+      const currentRuntimeMinutes = selectedSystemDetails.usage_time || 0;
+      const nextDueRuntimeMinutes = currentRuntimeMinutes + (repeatInterval * runtimePerMatchMinutes);
+      // Convert to hours for storage (next_due_runtime_hours field is still in hours)
+      const nextDueRuntime = nextDueRuntimeMinutes / 60;
 
-      // Calculate a due date far in the future (we'll track by runtime instead)
-      // Set due_date to null since we're tracking by runtime
+      // Insert maintenance with repeat interval and next due runtime
       const { error } = await supabase
         .from('maintenance_reviews')
         .insert([{
           system_id: selectedSystemDetails.id,
           type: newMaintenance.type,
           title: newMaintenance.title.trim(),
-          description: fullDescription,
+          description: newMaintenance.description.trim() || null,
           due_date: null, // We track by runtime, not date
-          completed: false
+          completed: false,
+          repeat_interval_matches: repeatInterval,
+          next_due_runtime_hours: nextDueRuntime
         }]);
 
       if (error) throw error;
 
-      setNewMaintenance({ title: '', description: '', due_after_matches: '', type: 'maintenance', repeat: true, repeat_every_matches: '' });
+      setNewMaintenance({ title: '', description: '', repeat_interval_matches: '', type: 'maintenance' });
       fetchMaintenanceItems(); // Refresh the upcoming maintenance list
       if (selectedSystemDetails) {
         await fetchSystemFailures(selectedSystemDetails.id); // Refresh graph data
       }
-      const repeatMsg = newMaintenance.repeat && newMaintenance.repeat_every_matches 
-        ? ` Repeats every ${newMaintenance.repeat_every_matches} match${parseFloat(newMaintenance.repeat_every_matches) !== 1 ? 'es' : ''}.`
-        : '';
-      showAlert(`Maintenance scheduled successfully. Due after ${matches} match${matches !== 1 ? 'es' : ''} (${(matches * runtimePerMatch).toFixed(2)} hours of runtime).${repeatMsg}`);
+      showAlert(`Maintenance scheduled successfully. Will repeat every ${repeatInterval} match${repeatInterval !== 1 ? 'es' : ''} (${(repeatInterval * runtimePerMatchMinutes).toFixed(1)} minutes of runtime).`);
     } catch (error) {
       console.error('Error scheduling maintenance:', error);
       showAlert('Error scheduling maintenance: ' + error.message);
@@ -856,16 +1073,28 @@ function Lifecycle() {
   // Prepare graph data for scatter plot (time in minutes vs events)
   const getGraphData = () => {
     const events = [];
-    const currentRuntime = (selectedSystemDetails?.usage_time || 0) * 60; // Convert to minutes
+    const currentRuntime = selectedSystemDetails?.usage_time || 0; // Already in minutes
     
     // Add failures (red dots)
-    // Note: We'll estimate runtime at time of failure based on chronological order
-    // In a production system, you'd want to store actual runtime at event time
+    // Since we don't store runtime_at_failure, distribute failures evenly across current runtime
+    // based on chronological order (oldest failures occur earlier in runtime, newest later)
     if (systemFailures && systemFailures.length > 0) {
       systemFailures.forEach((failure, index) => {
-        // Estimate runtime: distribute failures across current runtime
-        // This is an approximation - ideally you'd store runtime at failure time
-        const estimatedMinutes = (index / Math.max(systemFailures.length - 1, 1)) * currentRuntime;
+        let estimatedMinutes;
+        
+        if (systemFailures.length === 1) {
+          // Single failure: place at midpoint of current runtime
+          estimatedMinutes = currentRuntime * 0.5;
+        } else {
+          // Distribute failures evenly across runtime
+          // Oldest failure (index 0) at 20% of runtime, newest at 90% of runtime
+          // This gives some margin and assumes failures occur throughout usage, not at the very start/end
+          const startPercent = 0.2; // Start at 20% of runtime
+          const endPercent = 0.9;   // End at 90% of runtime
+          const progress = index / (systemFailures.length - 1); // 0 to 1
+          const percent = startPercent + (endPercent - startPercent) * progress;
+          estimatedMinutes = currentRuntime * percent;
+        }
         
         events.push({
           type: 'failure',
@@ -879,14 +1108,28 @@ function Lifecycle() {
     }
 
     // Add completed maintenance (blue dots)
+    // Use completed_at timestamp to estimate runtime position
     if (systemCompletedMaintenance && systemCompletedMaintenance.length > 0) {
-      systemCompletedMaintenance.forEach((maintenance, index) => {
-        // Estimate runtime similarly
-        const totalEvents = systemFailures.length + systemCompletedMaintenance.length;
-        const eventIndex = systemFailures.length + index;
-        const estimatedMinutes = totalEvents > 1 
-          ? (eventIndex / (totalEvents - 1)) * currentRuntime 
-          : currentRuntime * 0.5;
+      const systemCreatedAt = selectedSystemDetails?.created_at 
+        ? new Date(selectedSystemDetails.created_at).getTime() 
+        : null;
+      const currentTime = Date.now();
+      const systemLifetimeMs = systemCreatedAt ? (currentTime - systemCreatedAt) : null;
+      
+      systemCompletedMaintenance.forEach((maintenance) => {
+        let estimatedMinutes;
+        
+        const maintenanceTime = new Date(maintenance.completed_at || maintenance.created_at).getTime();
+        
+        if (systemCreatedAt && systemLifetimeMs && systemLifetimeMs > 0) {
+          // Use timestamp-based estimation
+          const timeSinceSystemCreation = maintenanceTime - systemCreatedAt;
+          const ratio = timeSinceSystemCreation / systemLifetimeMs;
+          estimatedMinutes = currentRuntime * Math.max(0, Math.min(1, ratio));
+        } else {
+          // Fallback: use midpoint if we can't calculate
+          estimatedMinutes = currentRuntime * 0.5;
+        }
         
         events.push({
           type: 'maintenance',
@@ -897,6 +1140,28 @@ function Lifecycle() {
           color: '#2563eb'
         });
       });
+    }
+
+    // Add predicted failures (light red dots)
+    if (predictedWarnings && predictedWarnings.length > 0 && selectedSystemDetails) {
+      predictedWarnings
+        .filter(warning => warning.system_id === selectedSystemDetails.id)
+        .forEach((warning) => {
+          const predictedMinutes = warning.predicted_failure_runtime_minutes || 0;
+          
+          // Only show predicted warnings that are in the future (or near current runtime)
+          if (predictedMinutes >= 0) {
+            events.push({
+              type: 'predicted_failure',
+              minutes: predictedMinutes,
+              title: 'Predicted Failure',
+              description: warning.review_notes || 'Predicted failure based on MTBF analysis',
+              date: new Date(warning.created_at),
+              color: '#fca5a5', // Light red
+              mtbfMinutes: warning.mtbf_minutes
+            });
+          }
+        });
     }
 
     // Add upcoming maintenance (light blue dots)
@@ -1036,109 +1301,6 @@ function Lifecycle() {
     }
   };
   
-  // Open edit upcoming maintenance modal
-  const openEditUpcomingMaintenance = (maintenance) => {
-    const desc = maintenance.description || '';
-    const originalDesc = desc.split('\n\n')[0] || '';
-    
-    // Extract matches info from description
-    let dueAfterMatches = '';
-    let repeat = false;
-    let repeatEveryMatches = '';
-    
-    const matchesMatch = desc.match(/after ([\d.]+) match/);
-    if (matchesMatch) {
-      dueAfterMatches = matchesMatch[1];
-    }
-    
-    const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
-    if (repeatMatch) {
-      repeat = true;
-      repeatEveryMatches = repeatMatch[1];
-    }
-    
-    setEditingUpcomingMaintenance(maintenance);
-    setEditUpcomingMaintenanceForm({
-      title: maintenance.title || '',
-      description: originalDesc,
-      due_after_matches: dueAfterMatches,
-      type: maintenance.type || 'maintenance',
-      repeat: repeat,
-      repeat_every_matches: repeatEveryMatches
-    });
-  };
-  
-  // Handle update upcoming maintenance
-  const handleUpdateUpcomingMaintenance = async () => {
-    if (!editingUpcomingMaintenance) return;
-    
-    if (!editUpcomingMaintenanceForm.title.trim()) {
-      showAlert('Please enter a maintenance title');
-      return;
-    }
-    
-    if (!editUpcomingMaintenanceForm.due_after_matches || parseFloat(editUpcomingMaintenanceForm.due_after_matches) <= 0) {
-      showAlert('Please enter a valid number of matches');
-      return;
-    }
-    
-    try {
-      const system = selectedSystemDetails || systems.find(s => s.id === editingUpcomingMaintenance.system_id);
-      if (!system) {
-        showAlert('System not found');
-        return;
-      }
-      
-      // Calculate new target runtime
-      const matches = parseFloat(editUpcomingMaintenanceForm.due_after_matches);
-      const runtimePerMatch = 2.5 / 60; // 2.5 minutes in hours
-      const targetRuntime = (system.usage_time || 0) + (matches * runtimePerMatch);
-      
-      // Build description with matches info
-      let matchesInfo = `Scheduled after ${matches} match${matches !== 1 ? 'es' : ''} (target runtime: ${targetRuntime.toFixed(2)} hours)`;
-      
-      if (editUpcomingMaintenanceForm.repeat && editUpcomingMaintenanceForm.repeat_every_matches) {
-        const repeatMatches = parseFloat(editUpcomingMaintenanceForm.repeat_every_matches);
-        matchesInfo += ` | Repeats every ${repeatMatches} match${repeatMatches !== 1 ? 'es' : ''}`;
-      }
-      
-      const fullDescription = editUpcomingMaintenanceForm.description.trim() 
-        ? `${editUpcomingMaintenanceForm.description.trim()}\n\n${matchesInfo}`
-        : matchesInfo;
-      
-      const { error } = await supabase
-        .from('maintenance_reviews')
-        .update({
-          title: editUpcomingMaintenanceForm.title.trim(),
-          description: fullDescription,
-          type: editUpcomingMaintenanceForm.type
-        })
-        .eq('id', editingUpcomingMaintenance.id);
-      
-      if (error) throw error;
-      
-      // Refresh data
-      fetchMaintenanceItems();
-      if (selectedSystemDetails && selectedSystemDetails.id === editingUpcomingMaintenance.system_id) {
-        await fetchSystemFailures(editingUpcomingMaintenance.system_id);
-      }
-      
-      setEditingUpcomingMaintenance(null);
-      setEditUpcomingMaintenanceForm({
-        title: '',
-        description: '',
-        due_after_matches: '',
-        type: 'maintenance',
-        repeat: false,
-        repeat_every_matches: ''
-      });
-      showAlert('Maintenance updated successfully');
-    } catch (error) {
-      console.error('Error updating maintenance:', error);
-      showAlert('Error updating maintenance: ' + error.message);
-    }
-  };
-  
   // Handle delete maintenance
   const handleDeleteMaintenance = async (maintenanceId) => {
     if (!window.confirm('Are you sure you want to delete this maintenance item? This action cannot be undone.')) {
@@ -1169,92 +1331,93 @@ function Lifecycle() {
   // Open confirmation modal for completing maintenance
   const openCompleteConfirmation = (item) => {
     setMaintenanceToComplete(item);
-    setShowConfirmModal(true);
+    
+    // Check if maintenance is premature (before due)
+    const system = item.systems || systems.find(s => s.id === item.system_id);
+    if (system) {
+      const currentRuntimeMinutes = system.usage_time || 0;
+      const nextDueRuntimeHours = item.next_due_runtime_hours || item.nextDueRuntimeHours;
+      const nextDueRuntimeMinutes = nextDueRuntimeHours ? nextDueRuntimeHours * 60 : null;
+      
+      if (nextDueRuntimeMinutes && currentRuntimeMinutes < nextDueRuntimeMinutes) {
+        // Show premature completion confirmation
+        setShowPrematureConfirm(true);
+      } else {
+        // Show regular confirmation
+        setShowConfirmModal(true);
+      }
+    } else {
+      // Default to regular confirmation if system not found
+      setShowConfirmModal(true);
+    }
   };
 
-  // Mark maintenance as completed and add to incidents graph
+  // Mark maintenance as completed and reset next due runtime
   const handleCompleteMaintenance = async () => {
     if (!maintenanceToComplete) return;
 
     const item = maintenanceToComplete;
+    const completedItemId = item.id;
     setShowConfirmModal(false);
+    setShowPrematureConfirm(false);
 
     try {
-      // Check if this is a repeating maintenance
-      const desc = item.description || '';
-      const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
-      const repeatEveryMatches = repeatMatch ? parseFloat(repeatMatch[1]) : null;
+      // Get the system to calculate the new target runtime
+      const system = item.systems || systems.find(s => s.id === item.system_id);
+      if (!system) {
+        throw new Error('System not found');
+      }
+
+      const currentRuntimeMinutes = system.usage_time || 0;
+      const runtimePerMatchMinutes = 2.5; // 2.5 minutes per match
       
-      // If it's repeating, create a new maintenance record for the next instance
-      if (repeatEveryMatches) {
-        // Get the system to calculate the new target runtime
-        const system = item.systems || systems.find(s => s.id === item.system_id);
-        if (system) {
-          const currentRuntime = system.usage_time || 0;
-          const runtimePerMatch = 2.5 / 60; // 2.5 minutes in hours
-          
-          // Calculate the next instance target runtime
-          // The next instance should be scheduled after the repeat interval from now
-          const nextTargetRuntime = currentRuntime + (repeatEveryMatches * runtimePerMatch);
-          
-          // Extract the original description (without the matches info)
-          const originalDesc = desc.split('\n\n')[0] || item.title;
-          
-          // Create new matches info for the next instance
-          const matchesInfo = `Scheduled after ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''} (target runtime: ${nextTargetRuntime.toFixed(2)} hours) | Repeats every ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''}`;
-          const fullDescription = originalDesc 
-            ? `${originalDesc}\n\n${matchesInfo}`
-            : matchesInfo;
-          
-          // Create the next instance
-          const { error: nextInstanceError } = await supabase
-            .from('maintenance_reviews')
-            .insert([{
-              system_id: item.system_id,
-              type: item.type,
-              title: item.title,
-              description: fullDescription,
-              due_date: null,
-              completed: false
-            }]);
-          
-          if (nextInstanceError) throw nextInstanceError;
+      // Get repeat interval from database column or description (backward compatibility)
+      let repeatIntervalMatches = item.repeat_interval_matches || item.repeatIntervalMatches;
+      if (!repeatIntervalMatches) {
+        const desc = item.description || '';
+        const repeatMatch = desc.match(/Repeats every ([\d.]+) match/);
+        if (repeatMatch) {
+          repeatIntervalMatches = parseFloat(repeatMatch[1]);
         }
       }
       
-      // Update maintenance item as completed
+      if (!repeatIntervalMatches) {
+        throw new Error('Repeat interval not found');
+      }
+      
+      // Calculate the next instance target runtime (in minutes)
+      // The next instance should be scheduled after the repeat interval from now
+      const nextTargetRuntimeMinutes = currentRuntimeMinutes + (repeatIntervalMatches * runtimePerMatchMinutes);
+      // Convert to hours for storage (next_due_runtime_hours field is still in hours)
+      const nextTargetRuntimeHours = nextTargetRuntimeMinutes / 60;
+      
+      // For repeating maintenance, directly update to reset for the next interval
+      // We don't mark as completed first - just update the next_due_runtime_hours
+      // This keeps the item visible in the activity list
       const { error: updateError } = await supabase
         .from('maintenance_reviews')
         .update({
-          completed: true,
-          completed_at: new Date().toISOString()
+          next_due_runtime_hours: nextTargetRuntimeHours,
+          repeat_interval_matches: repeatIntervalMatches,
+          updated_at: new Date().toISOString()
         })
-        .eq('id', item.id);
-
+        .eq('id', completedItemId);
+      
       if (updateError) throw updateError;
 
-      // Create a failure entry for the incidents graph
-      const { error: failureError } = await supabase
-        .from('failures')
-        .insert([{
-          system_id: item.system_id,
-          components_needing_replacement: [],
-          comment: `Completed maintenance: ${item.title}${item.description ? '\n\n' + item.description : ''}`
-        }]);
-
-      if (failureError) throw failureError;
-
-      // Refresh maintenance items and system failures if details modal is open
-      fetchMaintenanceItems();
+      // Refresh systems first to ensure system data is up to date
+      await fetchSystems();
+      
+      // Refresh maintenance items list from database to get updated next_due_runtime
+      await fetchMaintenanceItems();
+      setMaintenanceItemsKey(prev => prev + 1);
+      
       if (selectedSystemDetails && selectedSystemDetails.id === item.system_id) {
         await fetchSystemFailures(item.system_id);
       }
 
       setMaintenanceToComplete(null);
-      const repeatMsg = repeatEveryMatches 
-        ? ` Next instance scheduled for ${repeatEveryMatches} match${repeatEveryMatches !== 1 ? 'es' : ''} from now.`
-        : '';
-      showAlert('Maintenance marked as completed and added to incidents graph.' + repeatMsg);
+      showAlert(`Maintenance marked as completed. Next maintenance scheduled in ${repeatIntervalMatches} match${repeatIntervalMatches !== 1 ? 'es' : ''} (${(repeatIntervalMatches * runtimePerMatchMinutes).toFixed(1)} minutes).`);
     } catch (error) {
       console.error('Error completing maintenance:', error);
       setMaintenanceToComplete(null);
@@ -1305,25 +1468,14 @@ function Lifecycle() {
           <div className="dashboard-left-large">
             <div className="dashboard-box maintenance-box">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                <h3 style={{ margin: 0 }}>Upcoming Maintenance/Predicted Failures</h3>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                  <label style={{ fontSize: '0.875rem', whiteSpace: 'nowrap' }}>Matches ahead:</label>
-                  <input
-                    type="number"
-                    value={matchesAhead}
-                    onChange={(e) => setMatchesAhead(Math.max(1, parseInt(e.target.value) || 10))}
-                    min="1"
-                    step="1"
-                    style={{ width: '60px', padding: '0.25rem 0.5rem', fontSize: '0.875rem' }}
-                  />
-                </div>
+                <h3 style={{ margin: 0 }}>Activity List</h3>
               </div>
-              <div className="maintenance-list">
+              <div className="maintenance-list" key={`maintenance-list-${maintenanceItemsKey}`}>
                 {(() => {
                   const filteredItems = getFilteredMaintenanceItems();
                   return filteredItems.length === 0 ? (
                     <div className="empty-state" style={{ padding: '2rem' }}>
-                      <p>No upcoming maintenance or review items within the next {matchesAhead} matches</p>
+                      <p>No maintenance scheduled</p>
                     </div>
                   ) : (
                     <div className="maintenance-order-book">
@@ -1331,7 +1483,7 @@ function Lifecycle() {
                         const isDue = item.isDue;
                         const matchesRemaining = isDue ? Math.abs(item.matchesRemaining) : Math.max(0, item.matchesRemaining);
                         return (
-                          <div key={`${item.id}-${item.instanceNumber}-${index}`} className="maintenance-item" style={isDue ? { borderLeft: '4px solid #dc2626' } : {}}>
+                          <div key={`${item.id}-${index}`} className="maintenance-item" style={isDue ? { borderLeft: '4px solid #dc2626' } : {}}>
                             {isDue && (
                               <div style={{
                                 background: '#dc2626',
@@ -1348,25 +1500,20 @@ function Lifecycle() {
                               </div>
                             )}
                             <div className="maintenance-item-header">
-                              <span className="maintenance-type">{item.type}</span>
+                              <span className="maintenance-type" style={{ backgroundColor: '#00AEEF', color: '#ffffff' }}>{item.type}</span>
                               <span className="maintenance-system">
                                 {item.systems?.name || systems.find(s => s.id === item.system_id)?.name || 'Unknown System'}
                               </span>
                             </div>
-                            <div className="maintenance-item-title">{item.title}</div>
+                            <div className="maintenance-item-title" style={{ color: '#000000' }}>{item.title}</div>
                             {item.description && (
                               <div className="maintenance-item-description">
-                                {item.description.split('\n\n')[0]}
-                                {item.instanceNumber > 0 && (
-                                  <div style={{ marginTop: '0.5rem', fontSize: '0.85rem', color: '#6b7280' }}>
-                                    Instance #{item.instanceNumber + 1}
-                                  </div>
-                                )}
+                                {item.description}
                               </div>
                             )}
                             <div className="maintenance-item-due" style={{ color: isDue ? '#dc2626' : '#f59e0b', marginTop: '0.5rem' }}>
                               {isDue ? (
-                                <span>⚠️ Due now ({matchesRemaining.toFixed(1)} matches overdue)</span>
+                                <span>⚠️ Overdue ({matchesRemaining.toFixed(1)} matches)</span>
                               ) : (
                                 <span>⏱️ {matchesRemaining.toFixed(1)} matches remaining ({(matchesRemaining * 2.5).toFixed(1)} minutes)</span>
                               )}
@@ -1394,6 +1541,99 @@ function Lifecycle() {
                 })()}
               </div>
             </div>
+
+            {/* Predicted Warnings Box */}
+            <div className="dashboard-box maintenance-box" style={{ marginTop: '2rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+                <h3 style={{ margin: 0 }}>Predicted Warnings</h3>
+              </div>
+              <div className="maintenance-list">
+                {(() => {
+                  const filteredWarnings = getFilteredPredictedWarnings();
+                  return filteredWarnings.length === 0 ? (
+                    <div className="empty-state" style={{ padding: '2rem' }}>
+                      <p>No predicted warnings</p>
+                      <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginTop: '0.5rem' }}>
+                        Warnings will appear here based on MTBF analysis after 2 or more failures are reported.
+                      </small>
+                    </div>
+                  ) : (
+                    <div className="maintenance-order-book">
+                      {filteredWarnings.map((warning, index) => {
+                        const isDue = warning.isDue;
+                        const matchesRemaining = isDue ? Math.abs(warning.matchesUntilPredicted) : Math.max(0, warning.matchesUntilPredicted);
+                        return (
+                          <div key={`${warning.id}-${index}`} className="maintenance-item" style={isDue ? { borderLeft: '4px solid #f59e0b' } : { borderLeft: '4px solid #3b82f6' }}>
+                            {isDue && (
+                              <div style={{
+                                background: '#f59e0b',
+                                color: '#ffffff',
+                                padding: '0.25rem 0.75rem',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: '700',
+                                textTransform: 'uppercase',
+                                display: 'inline-block',
+                                marginBottom: '0.5rem'
+                              }}>
+                                ⚠️ DUE
+                              </div>
+                            )}
+                            <div className="maintenance-item-header">
+                              <span className="maintenance-type" style={{ backgroundColor: '#8b5cf6', color: '#ffffff' }}>Predicted Review</span>
+                              <span className="maintenance-system">
+                                {warning.systems?.name || systems.find(s => s.id === warning.system_id)?.name || 'Unknown System'}
+                              </span>
+                            </div>
+                            <div className="maintenance-item-title" style={{ color: '#000000' }}>
+                              MTBF-Based Predictive Review
+                            </div>
+                            <div className="maintenance-item-description" style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                              {warning.review_notes}
+                            </div>
+                            {warning.likely_failures && warning.likely_failures.length > 0 && (
+                              <div style={{ marginTop: '0.5rem', marginBottom: '0.5rem' }}>
+                                <strong style={{ fontSize: '0.875rem', color: '#374151' }}>Common failure components:</strong>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', marginTop: '0.25rem' }}>
+                                  {warning.likely_failures.map((component, idx) => (
+                                    <span key={idx} style={{
+                                      background: '#fef3c7',
+                                      color: '#92400e',
+                                      padding: '0.25rem 0.5rem',
+                                      borderRadius: '4px',
+                                      fontSize: '0.75rem',
+                                      fontWeight: '500'
+                                    }}>
+                                      {component}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                            <div className="maintenance-item-due" style={{ color: isDue ? '#f59e0b' : '#3b82f6', marginTop: '0.5rem' }}>
+                              {isDue ? (
+                                <span>⚠️ Predicted failure time reached ({Math.abs(matchesRemaining).toFixed(1)} matches ago)</span>
+                              ) : (
+                                <span>📊 Predicted in {matchesRemaining.toFixed(1)} matches ({(warning.minutesUntilPredicted).toFixed(1)} minutes) | MTBF: {(warning.mtbf_minutes / 60).toFixed(1)} hours</span>
+                              )}
+                            </div>
+                            <div className="maintenance-item-actions">
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                onClick={() => handleDismissPredictedWarning(warning.id)}
+                                style={{ width: '100%' }}
+                              >
+                                Dismiss
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
           </div>
 
           {/* Right Side - Two Smaller Boxes */}
@@ -1402,12 +1642,33 @@ function Lifecycle() {
             <div className="dashboard-box">
               <h3>Upload Wpilog</h3>
               <div className="form-group">
-                <label>Wpilog File</label>
+                <label>Runtime (minutes)</label>
+                <input
+                  type="number"
+                  value={wpilogTime}
+                  onChange={(e) => setWpilogTime(e.target.value)}
+                  step="0.1"
+                  min="0"
+                  placeholder="Enter runtime in minutes"
+                  disabled={uploadingWpilog || !!wpilogFile}
+                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
+                />
+                <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                  This will add the runtime to all systems
+                </small>
+              </div>
+              <div className="form-group" style={{ marginTop: '1rem' }}>
+                <label>Wpilog File (optional)</label>
                 <input
                   type="file"
                   accept=".wpilog"
-                  onChange={(e) => setWpilogFile(e.target.files[0])}
-                  disabled={uploadingWpilog}
+                  onChange={(e) => {
+                    setWpilogFile(e.target.files[0]);
+                    if (e.target.files[0]) {
+                      setWpilogTime(''); // Clear manual time when file is selected
+                    }
+                  }}
+                  disabled={uploadingWpilog || !!wpilogTime}
                   style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
                 />
                 {wpilogFile && (
@@ -1415,14 +1676,17 @@ function Lifecycle() {
                     Selected: {wpilogFile.name}
                   </p>
                 )}
+                <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginTop: '0.25rem' }}>
+                  Upload a .wpilog file to automatically parse runtime, or enter time manually above
+                </small>
               </div>
               <button
                 className="btn btn-primary"
                 onClick={handleWpilogUpload}
-                disabled={uploadingWpilog || !wpilogFile}
+                disabled={uploadingWpilog || (!wpilogFile && !wpilogTime)}
                 style={{ width: '100%' }}
               >
-                {uploadingWpilog ? 'Processing...' : 'Upload & Process Log'}
+                {uploadingWpilog ? 'Processing...' : (wpilogFile ? 'Upload & Process Log' : 'Add Time to Systems')}
               </button>
             </div>
 
@@ -1613,7 +1877,7 @@ function Lifecycle() {
                         <p className="system-description">{system.description}</p>
                       )}
                       <div className="system-usage">
-                        <label>Usage Time (hours):</label>
+                        <label>Usage Time (minutes):</label>
                         <input
                           type="number"
                           value={system.usage_time || 0}
@@ -1630,7 +1894,7 @@ function Lifecycle() {
                         />
                       </div>
                       <div className="system-usage" style={{ marginTop: '1rem' }}>
-                        <label>Time Since Last Maintenance (hours):</label>
+                        <label>Time Since Last Maintenance (minutes):</label>
                         <input
                           type="number"
                           value={(system.time_since_last_maintenance || 0).toFixed(2)}
@@ -1732,7 +1996,7 @@ function Lifecycle() {
                         <p className="system-description">{system.description}</p>
                       )}
                       <div className="system-usage">
-                        <label>Usage Time (hours):</label>
+                        <label>Usage Time (minutes):</label>
                         <input
                           type="number"
                           value={system.usage_time || 0}
@@ -1749,7 +2013,7 @@ function Lifecycle() {
                         />
                       </div>
                       <div className="system-usage" style={{ marginTop: '1rem' }}>
-                        <label>Time Since Last Maintenance (hours):</label>
+                        <label>Time Since Last Maintenance (minutes):</label>
                         <input
                           type="number"
                           value={(system.time_since_last_maintenance || 0).toFixed(2)}
@@ -1845,8 +2109,8 @@ function Lifecycle() {
                 <label>Initial Usage Time (minutes)</label>
                 <input
                   type="number"
-                  value={((newSystem.usage_time || 0) * 60).toFixed(1)}
-                  onChange={(e) => setNewSystem({ ...newSystem, usage_time: (parseFloat(e.target.value) || 0) / 60 })}
+                  value={(newSystem.usage_time || 0).toFixed(1)}
+                  onChange={(e) => setNewSystem({ ...newSystem, usage_time: parseFloat(e.target.value) || 0 })}
                   step="0.1"
                   min="0"
                 />
@@ -1962,13 +2226,49 @@ function Lifecycle() {
         </div>
       )}
 
+      {/* Premature Completion Confirmation Modal */}
+      {showPrematureConfirm && maintenanceToComplete && (
+        <div className="modal-overlay" onClick={() => { setShowPrematureConfirm(false); setMaintenanceToComplete(null); }}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Premature Completion</h3>
+              <button className="modal-close" onClick={() => { setShowPrematureConfirm(false); setMaintenanceToComplete(null); }}>
+                ×
+              </button>
+            </div>
+            <div className="modal-form">
+              <p style={{ marginBottom: '1rem', lineHeight: '1.6' }}>
+                This maintenance is not due yet. Do you want to complete it prematurely?
+              </p>
+              <p style={{ marginBottom: '1.5rem', color: '#6b7280', fontSize: '0.9rem', lineHeight: '1.6' }}>
+                Maintenance: <strong>"{maintenanceToComplete.title}"</strong>
+              </p>
+              <div className="modal-actions">
+                <button 
+                  onClick={() => {
+                    setShowPrematureConfirm(false);
+                    setMaintenanceToComplete(null);
+                  }} 
+                  className="btn btn-secondary"
+                >
+                  Cancel
+                </button>
+                <button onClick={() => { setShowPrematureConfirm(false); setShowConfirmModal(true); }} className="btn btn-primary">
+                  Yes, Complete
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Confirmation Modal for Completing Maintenance */}
       {showConfirmModal && maintenanceToComplete && (
-        <div className="modal-overlay" onClick={() => setShowConfirmModal(false)}>
+        <div className="modal-overlay" onClick={() => { setShowConfirmModal(false); setMaintenanceToComplete(null); }}>
           <div className="modal-content" onClick={(e) => e.stopPropagation()}>
             <div className="modal-header">
               <h3>Confirm Completion</h3>
-              <button className="modal-close" onClick={() => setShowConfirmModal(false)}>
+              <button className="modal-close" onClick={() => { setShowConfirmModal(false); setMaintenanceToComplete(null); }}>
                 ×
               </button>
             </div>
@@ -1977,7 +2277,7 @@ function Lifecycle() {
                 Mark <strong>"{maintenanceToComplete.title}"</strong> as completed?
               </p>
               <p style={{ marginBottom: '1.5rem', color: '#6b7280', fontSize: '0.9rem', lineHeight: '1.6' }}>
-                This will mark the maintenance as completed and add it to the incidents graph for the system.
+                This will mark the maintenance as completed and reset it for the next interval.
               </p>
               <div className="modal-actions">
                 <button 
@@ -2115,123 +2415,6 @@ function Lifecycle() {
         </div>
       )}
 
-      {/* Edit Upcoming Maintenance Modal */}
-      {editingUpcomingMaintenance && (
-        <div className="modal-overlay" onClick={() => setEditingUpcomingMaintenance(null)}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()} style={{ maxWidth: '600px' }}>
-            <div className="modal-header">
-              <h3>Edit Maintenance</h3>
-              <button className="modal-close" onClick={() => setEditingUpcomingMaintenance(null)}>
-                ×
-              </button>
-            </div>
-            <div className="modal-form">
-              <div className="form-group">
-                <label>Maintenance Type</label>
-                <select
-                  value={editUpcomingMaintenanceForm.type}
-                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, type: e.target.value })}
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
-                >
-                  <option value="maintenance">Maintenance</option>
-                  <option value="review">Review</option>
-                </select>
-              </div>
-              <div className="form-group">
-                <label>Title *</label>
-                <input
-                  type="text"
-                  value={editUpcomingMaintenanceForm.title}
-                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, title: e.target.value })}
-                  required
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem' }}
-                />
-              </div>
-              <div className="form-group">
-                <label>Description</label>
-                <textarea
-                  value={editUpcomingMaintenanceForm.description}
-                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, description: e.target.value })}
-                  rows={3}
-                  placeholder="Additional details..."
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '1rem', resize: 'vertical' }}
-                />
-              </div>
-              <div className="form-group">
-                <label>Due After (Matches) *</label>
-                <input
-                  type="number"
-                  value={editUpcomingMaintenanceForm.due_after_matches}
-                  onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, due_after_matches: e.target.value })}
-                  placeholder="e.g., 10"
-                  min="1"
-                  step="1"
-                  required
-                  style={{ width: '100%', padding: '0.5rem', marginBottom: '0.5rem' }}
-                />
-                <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginBottom: '1rem' }}>
-                  1 FRC match = 2:30 (2.5 minutes) of runtime
-                  {editUpcomingMaintenanceForm.due_after_matches && parseFloat(editUpcomingMaintenanceForm.due_after_matches) > 0 && (
-                    <span style={{ display: 'block', marginTop: '0.25rem' }}>
-                      = {(parseFloat(editUpcomingMaintenanceForm.due_after_matches) * 2.5 / 60).toFixed(2)} hours of additional runtime
-                    </span>
-                  )}
-                </small>
-              </div>
-              <div className="form-group">
-                <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                  <input
-                    type="checkbox"
-                    checked={editUpcomingMaintenanceForm.repeat}
-                    onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, repeat: e.target.checked, repeat_every_matches: e.target.checked ? editUpcomingMaintenanceForm.repeat_every_matches : '' })}
-                    style={{ width: 'auto', margin: 0 }}
-                  />
-                  <span>Repeat this maintenance</span>
-                </label>
-                {editUpcomingMaintenanceForm.repeat && (
-                  <div style={{ marginTop: '0.5rem', marginLeft: '1.5rem' }}>
-                    <label style={{ fontSize: '0.875rem', display: 'block', marginBottom: '0.25rem' }}>Repeat every (matches):</label>
-                    <input
-                      type="number"
-                      value={editUpcomingMaintenanceForm.repeat_every_matches}
-                      onChange={(e) => setEditUpcomingMaintenanceForm({ ...editUpcomingMaintenanceForm, repeat_every_matches: e.target.value })}
-                      placeholder="e.g., 20"
-                      min="1"
-                      step="1"
-                      style={{ width: '100%', padding: '0.5rem', marginBottom: '0.5rem' }}
-                    />
-                    <small style={{ color: '#6b7280', fontSize: '0.875rem' }}>
-                      Maintenance will be scheduled again every {editUpcomingMaintenanceForm.repeat_every_matches || 'X'} match{parseFloat(editUpcomingMaintenanceForm.repeat_every_matches) !== 1 ? 'es' : ''} after completion
-                    </small>
-                  </div>
-                )}
-              </div>
-              <div className="modal-actions">
-                <button 
-                  onClick={() => {
-                    setEditingUpcomingMaintenance(null);
-                    setEditUpcomingMaintenanceForm({
-                      title: '',
-                      description: '',
-                      due_after_matches: '',
-                      type: 'maintenance',
-                      repeat: false,
-                      repeat_every_matches: ''
-                    });
-                  }} 
-                  className="btn btn-secondary"
-                >
-                  Cancel
-                </button>
-                <button onClick={handleUpdateUpcomingMaintenance} className="btn btn-primary">
-                  Save Changes
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* System Details Modal */}
       {showSystemDetails && selectedSystemDetails && (
         <div className="modal-overlay" onClick={() => setShowSystemDetails(false)}>
@@ -2247,10 +2430,10 @@ function Lifecycle() {
               <div className="system-details-section">
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
                   <div>
-                    <strong>Current Runtime:</strong> {((selectedSystemDetails.usage_time || 0) * 60).toFixed(1)} minutes 
+                    <strong>Current Runtime:</strong> {(selectedSystemDetails.usage_time || 0).toFixed(1)} minutes 
                     {selectedSystemDetails.usage_time > 0 && (
                       <span style={{ color: '#6b7280', marginLeft: '0.5rem' }}>
-                        ({Math.round((selectedSystemDetails.usage_time || 0) * 60 / 2.5)} matches)
+                        ({Math.round((selectedSystemDetails.usage_time || 0) / 2.5)} matches)
                       </span>
                     )}
                   </div>
@@ -2266,7 +2449,7 @@ function Lifecycle() {
                   ) : (
                     <IncidentsGraph 
                       data={getGraphData()} 
-                      currentRuntimeMinutes={(selectedSystemDetails.usage_time || 0) * 60}
+                      currentRuntimeMinutes={selectedSystemDetails.usage_time || 0}
                       systemCreated={selectedSystemDetails.created_at}
                     />
                   )}
@@ -2434,16 +2617,6 @@ function Lifecycle() {
                                 className="btn btn-secondary btn-sm"
                                 onClick={(e) => {
                                   e.stopPropagation();
-                                  openEditUpcomingMaintenance(maintenance);
-                                }}
-                                style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem' }}
-                              >
-                                Edit
-                              </button>
-                              <button
-                                className="btn btn-secondary btn-sm"
-                                onClick={(e) => {
-                                  e.stopPropagation();
                                   handleDeleteMaintenance(maintenance.id);
                                 }}
                                 style={{ fontSize: '0.75rem', padding: '0.25rem 0.5rem', background: '#dc2626', color: '#ffffff' }}
@@ -2539,12 +2712,12 @@ function Lifecycle() {
                     />
                   </div>
                   <div className="form-group">
-                    <label>Due After (Matches) *</label>
+                    <label>Repeat Interval (Matches) *</label>
                     <input
                       type="number"
-                      value={newMaintenance.due_after_matches}
-                      onChange={(e) => setNewMaintenance({ ...newMaintenance, due_after_matches: e.target.value })}
-                      placeholder="e.g., 10"
+                      value={newMaintenance.repeat_interval_matches}
+                      onChange={(e) => setNewMaintenance({ ...newMaintenance, repeat_interval_matches: e.target.value })}
+                      placeholder="e.g., 20"
                       min="1"
                       step="1"
                       required
@@ -2552,40 +2725,12 @@ function Lifecycle() {
                     />
                     <small style={{ color: '#6b7280', fontSize: '0.875rem', display: 'block', marginBottom: '1rem' }}>
                       1 FRC match = 2:30 (2.5 minutes) of runtime
-                      {newMaintenance.due_after_matches && parseFloat(newMaintenance.due_after_matches) > 0 && (
+                      {newMaintenance.repeat_interval_matches && parseFloat(newMaintenance.repeat_interval_matches) > 0 && (
                         <span style={{ display: 'block', marginTop: '0.25rem' }}>
-                          = {(parseFloat(newMaintenance.due_after_matches) * 2.5 / 60).toFixed(2)} hours of additional runtime
+                          Maintenance will repeat every {newMaintenance.repeat_interval_matches} match{parseFloat(newMaintenance.repeat_interval_matches) !== 1 ? 'es' : ''} ({(parseFloat(newMaintenance.repeat_interval_matches) * 2.5 / 60).toFixed(2)} hours)
                         </span>
                       )}
                     </small>
-                  </div>
-                  <div className="form-group">
-                    <label style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', cursor: 'pointer' }}>
-                      <input
-                        type="checkbox"
-                        checked={newMaintenance.repeat}
-                        onChange={(e) => setNewMaintenance({ ...newMaintenance, repeat: e.target.checked, repeat_every_matches: e.target.checked ? newMaintenance.repeat_every_matches : '' })}
-                        style={{ width: 'auto', margin: 0 }}
-                      />
-                      <span>Repeat this maintenance</span>
-                    </label>
-                    {newMaintenance.repeat && (
-                      <div style={{ marginTop: '0.5rem', marginLeft: '1.5rem' }}>
-                        <label style={{ fontSize: '0.875rem', display: 'block', marginBottom: '0.25rem' }}>Repeat every (matches):</label>
-                        <input
-                          type="number"
-                          value={newMaintenance.repeat_every_matches}
-                          onChange={(e) => setNewMaintenance({ ...newMaintenance, repeat_every_matches: e.target.value })}
-                          placeholder="e.g., 20"
-                          min="1"
-                          step="1"
-                          style={{ width: '100%', padding: '0.5rem', marginBottom: '0.5rem' }}
-                        />
-                        <small style={{ color: '#6b7280', fontSize: '0.875rem' }}>
-                          Maintenance will be scheduled again every {newMaintenance.repeat_every_matches || 'X'} match{parseFloat(newMaintenance.repeat_every_matches) !== 1 ? 'es' : ''} after completion
-                        </small>
-                      </div>
-                    )}
                   </div>
                   <button type="submit" className="btn btn-primary">
                     Schedule Maintenance
@@ -2604,6 +2749,49 @@ function Lifecycle() {
 function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
   const [hoveredPoint, setHoveredPoint] = useState(null);
 
+  // Calculate default values using function initializers to avoid calling hooks conditionally
+  const calculateDefaults = () => {
+    if (!data || data.length === 0) {
+      return {
+        defaultMinMinutes: 0,
+        defaultMaxMinutes: 10,
+        defaultYAxisMax: 5
+      };
+    }
+
+    // Calculate default time range: from 0 to current runtime + 10 matches (25 minutes ahead)
+    const defaultMaxMinutes = Math.max(
+      currentRuntimeMinutes + 25, // 10 matches ahead
+      ...data.map(d => d.minutes),
+      10 // minimum range
+    );
+    const defaultMinMinutes = 0;
+
+    // Calculate default Y-axis max based on actual data
+    const timeBucketSize = 0.1;
+    const eventsByTimeForDefault = {};
+    data.forEach((event) => {
+      const bucketKey = Math.round(event.minutes / timeBucketSize) * timeBucketSize;
+      if (!eventsByTimeForDefault[bucketKey]) {
+        eventsByTimeForDefault[bucketKey] = [];
+      }
+      eventsByTimeForDefault[bucketKey].push(event);
+    });
+    const defaultYAxisMax = Math.max(
+      ...Object.values(eventsByTimeForDefault).map(events => events.length),
+      5 // minimum of 5
+    );
+
+    return { defaultMinMinutes, defaultMaxMinutes, defaultYAxisMax };
+  };
+
+  // State for axis controls - must be declared before any early returns
+  const defaults = calculateDefaults();
+  const [xAxisMin, setXAxisMin] = useState(defaults.defaultMinMinutes);
+  const [xAxisMax, setXAxisMax] = useState(defaults.defaultMaxMinutes);
+  const [yAxisMax, setYAxisMax] = useState(defaults.defaultYAxisMax);
+
+  // Early return after all hooks are declared
   if (!data || data.length === 0) {
     return <div className="graph-empty">No events recorded yet</div>;
   }
@@ -2614,13 +2802,9 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
   const plotHeight = graphHeight - padding.top - padding.bottom;
   const plotWidth = graphWidth - padding.left - padding.right;
 
-  // Calculate time range: from 0 to current runtime + 10 matches (25 minutes ahead)
-  const maxMinutes = Math.max(
-    currentRuntimeMinutes + 25, // 10 matches ahead
-    ...data.map(d => d.minutes),
-    10 // minimum range
-  );
-  const minMinutes = 0;
+  // Use controlled axis values
+  const maxMinutes = xAxisMax;
+  const minMinutes = xAxisMin;
 
   // Group events by time (round to nearest 0.1 minutes for grouping)
   // Count how many events occur at each time point
@@ -2635,15 +2819,8 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
     eventsByTime[bucketKey].push(event);
   });
   
-  // Find the maximum number of simultaneous events
-  const maxSimultaneousEvents = Math.max(
-    ...Object.values(eventsByTime).map(events => events.length),
-    1
-  );
-  
   // Y-axis: number of events at each time point (not cumulative)
-  // Always display up to 5 events on the y-axis
-  const yAxisMax = 5;
+  // Use controlled yAxisMax value
   const yScale = (eventCount) => {
     // Invert y-axis: higher event count at top (SVG y=0 is at top)
     // Cap eventCount at yAxisMax for scaling purposes
@@ -2661,23 +2838,94 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
     };
   });
 
-  // X-axis scale: minutes to pixels
+  // X-axis scale: minutes to pixels (accounting for minMinutes)
   const xScale = (minutes) => {
-    return padding.left + (minutes / maxMinutes) * plotWidth;
+    const range = maxMinutes - minMinutes;
+    if (range <= 0) return padding.left;
+    return padding.left + ((minutes - minMinutes) / range) * plotWidth;
   };
 
-  const currentRuntimeX = xScale(currentRuntimeMinutes);
+  // Filter events to only show those within the X-axis range
+  const filteredEventData = eventDataWithCount.filter(
+    event => event.minutes >= minMinutes && event.minutes <= maxMinutes
+  );
+
+  const currentRuntimeX = currentRuntimeMinutes >= minMinutes && currentRuntimeMinutes <= maxMinutes 
+    ? xScale(currentRuntimeMinutes) 
+    : null;
 
   return (
     <div className="timeline-graph-container">
+      {/* Axis Controls */}
+      <div className="axis-controls">
+        <div className="axis-control-group">
+          <label htmlFor="x-axis-min">X-Axis Min (minutes):</label>
+          <input
+            id="x-axis-min"
+            type="number"
+            min="0"
+            step="0.1"
+            value={xAxisMin}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value) || 0;
+              setXAxisMin(Math.min(val, xAxisMax - 0.1));
+            }}
+            className="axis-input"
+          />
+        </div>
+        <div className="axis-control-group">
+          <label htmlFor="x-axis-max">X-Axis Max (minutes):</label>
+          <input
+            id="x-axis-max"
+            type="number"
+            min={xAxisMin + 0.1}
+            step="0.1"
+            value={xAxisMax}
+            onChange={(e) => {
+              const val = parseFloat(e.target.value) || xAxisMin + 1;
+              setXAxisMax(Math.max(val, xAxisMin + 0.1));
+            }}
+            className="axis-input"
+          />
+        </div>
+        <div className="axis-control-group">
+          <label htmlFor="y-axis-max">Y-Axis Max (events):</label>
+          <input
+            id="y-axis-max"
+            type="number"
+            min="1"
+            step="1"
+            value={yAxisMax}
+            onChange={(e) => {
+              const val = parseInt(e.target.value) || 1;
+              setYAxisMax(Math.max(1, val));
+            }}
+            className="axis-input"
+          />
+        </div>
+        <button
+          onClick={() => {
+            const currentDefaults = calculateDefaults();
+            setXAxisMin(currentDefaults.defaultMinMinutes);
+            setXAxisMax(currentDefaults.defaultMaxMinutes);
+            setYAxisMax(currentDefaults.defaultYAxisMax);
+          }}
+          className="axis-reset-btn"
+        >
+          Reset to Defaults
+        </button>
+      </div>
       <div className="timeline-graph-wrapper">
         <svg width={graphWidth} height={graphHeight} className="timeline-graph" style={{ overflow: 'visible' }}>
-          {/* Vertical grid lines - show every 5 minutes or appropriate intervals */}
+          {/* Vertical grid lines - show appropriate intervals based on controlled range */}
           {(() => {
-            const numGridLines = Math.ceil(maxMinutes / 5);
+            const range = maxMinutes - minMinutes;
+            const interval = range > 0 ? Math.max(1, Math.ceil(range / 10)) : 1;
+            const numGridLines = Math.ceil(range / interval);
             const gridLines = [];
             for (let i = 0; i <= numGridLines; i++) {
-              const minutes = (maxMinutes / numGridLines) * i;
+              const minutes = minMinutes + (interval * i);
+              if (minutes > maxMinutes) break;
               const x = xScale(minutes);
               gridLines.push(
                 <g key={`v-${i}`}>
@@ -2759,7 +3007,7 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
           />
 
           {/* Current runtime indicator (dotted vertical line) */}
-          {currentRuntimeMinutes > 0 && (
+          {currentRuntimeX !== null && currentRuntimeMinutes > 0 && (
             <g>
               <line
                 x1={currentRuntimeX}
@@ -2784,7 +3032,7 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
           )}
 
           {/* Event dots */}
-          {eventDataWithCount.map((event, index) => {
+          {filteredEventData.map((event, index) => {
             const x = xScale(event.minutes);
             const y = yScale(event.eventCount);
             const isHovered = hoveredPoint === index;
@@ -2949,6 +3197,10 @@ function IncidentsGraph({ data, currentRuntimeMinutes, systemCreated }) {
         <div className="legend-item">
           <span className="legend-dot" style={{ backgroundColor: '#2563eb' }}></span>
           <span>Completed Maintenance</span>
+        </div>
+        <div className="legend-item">
+          <span className="legend-dot" style={{ backgroundColor: '#fca5a5' }}></span>
+          <span>Predicted Failure</span>
         </div>
         <div className="legend-item">
           <span className="legend-dot" style={{ backgroundColor: '#60a5fa' }}></span>
